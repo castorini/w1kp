@@ -1,0 +1,10 @@
+requests~=2.31.0
+Pillow~=9.1.1
+tqdm~=4.66.1
+nltk~=3.8.1
+accelerate==0.25.0
+transformers==4.36.2
+invisible_watermark==0.2.0
+safetensors==0.4.1
+diffusers==0.25.0
+editdistance==0.8.1
