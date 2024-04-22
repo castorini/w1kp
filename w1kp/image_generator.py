@@ -1,120 +1,34 @@
+import asyncio
 import json
 import logging
-import multiprocessing as mp
 from io import BytesIO
 from pathlib import Path
 import time
-from typing import List
+from typing import List, Dict, Any
 
+import aiohttp
 from diffusers import DiffusionPipeline, StableDiffusionPipeline, DPMSolverMultistepScheduler
-import nltk
-from nltk.corpus import stopwords
-from nltk.stem.porter import PorterStemmer
-import editdistance
-import requests
 import torch
 
 from PIL import Image
-from tqdm import trange
 
 
-__all__ = ['ImageGenerator', 'AzureOpenAIImageGenerator', 'ImageGeneratorPool', 'OPINION_COLOR_PROMPT',
-           'StableDiffusionXLImageGenerator', 'StableDiffusion2ImageGenerator', 'OPINION_COLOR_PROMPT_SD']
+__all__ = ['ImageGenerator', 'AzureOpenAIImageGenerator', 'StableDiffusionXLImageGenerator',
+           'StableDiffusion2ImageGenerator']
 
-
-nltk.download('punkt')
-nltk.download('stopwords')
-stop_words = set(stopwords.words('english'))
-stop_words.update({'.', ',', '!', '?', '(', ')', '[', ']', '{', '}', '<', '>', ':', ';', '"', "'s"})
-OPINION_COLOR_PROMPT = 'Legend: red is negative, green is positive. A single color describing this word: "{word}"'
-OPINION_COLOR_PROMPT_SD = 'Legend: red = bad, green = good. Title: "{word}", monochrome.'
-
-
-class ImageGeneratorPool:
-    """
-    Generates a batch of images from multiple image generators in parallel using multiprocessing. If the generator does
-    not support multiprocessing (:py:meth:`.ImageGenerator.is_multiprocessable`), it falls back to single-threading.
-
-    Examples:
-        >>> image_generators = AzureOpenAIImageGenerator.parse_from_path('path/to/image/config.json')
-        >>> pool = ImageGeneratorPool(image_generators)
-        >>> images = pool.generate_all(['prompt 1', 'prompt 2', 'prompt 3'], quality='standard')
-    """
-    def __init__(self, image_generators: List['ImageGenerator'], delay_secs: float = 0.1, suppress_errors: bool = True):
-        self.suppress_errors = suppress_errors
-        self.mp_model_queue = mp.Queue()
-        self.st_model_queue = mp.Queue()
-
-        for image_generator in image_generators:
-            if image_generator.is_multiprocessable():
-                self.mp_model_queue.put(image_generator)
-            else:
-                self.st_model_queue.put(image_generator)
-
-        self.input_queue = mp.Queue()
-        self.output_queue = mp.Queue()
-        self.processes = [mp.Process(target=self._run) for _ in range(len(image_generators))]
-        self._current_idx = 0
-        self.delay_secs = delay_secs
-        self.has_mp_models = not self.mp_model_queue.empty()
-        self.has_st_models = not self.st_model_queue.empty()
-
-        for process in self.processes:
-            process.start()
-
-    def generate_all(self, inputs: List[str], **kwargs):
-        for prompt in inputs:
-            self._enqueue(prompt, **kwargs)
-
-        values = [self._dequeue() for _ in trange(len(inputs))]
-        values.sort(key=lambda x: x[0])
-        values = [value[1] for value in values]
-
-        return values
-
-    def _enqueue(self, prompt: str, **kwargs) -> int:
-        self.input_queue.put((self._current_idx, prompt, kwargs))
-        self._current_idx += 1
-
-        return self._current_idx - 1
-
-    def _dequeue(self):
-        return self.output_queue.get()
-
-    def _run(self):
-        while True:
-            if self.has_mp_models:
-                if self.mp_model_queue.empty() and self.has_st_models:
-                    model = self.st_model_queue.get()
-                else:
-                    model = self.mp_model_queue.get()
-            else:
-                model = self.st_model_queue.get()
-
-            idx, prompt, kwargs = self.input_queue.get()
-
-            try:
-                image = model.generate_image(prompt, **kwargs)
-                self.output_queue.put((idx, image))
-            except:
-                import traceback
-                traceback.print_exc()
-
-                if not self.suppress_errors:
-                    raise
-
-                self.input_queue.put((idx, prompt, kwargs))  # try again
-            finally:
-                self.mp_model_queue.put(model)  # put back in queue
-
-            time.sleep(self.delay_secs)
+from .utils import set_seed
 
 
 class ImageGenerator:
-    def is_multiprocessable(self) -> bool:
-        return True
+    @property
+    def is_multiple(self) -> bool:
+        return False
 
-    def generate_image(self, prompt: str, **kwargs) -> Image:
+    @property
+    def num_multiple(self) -> int:
+        return 1
+
+    async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
         """
         Generates an image from a prompt using Azure's OpenAI API.
 
@@ -123,9 +37,61 @@ class ImageGenerator:
             **kwargs: Additional arguments to pass to the API
 
         Returns:
-            The generated image as a Pillow Image.
+            A (possibly list of) dictionary with the key `'image'` containing the generated image as a Pillow Image
+            and `'revised_prompt'` the revised prompt. If `is_multiple` is True, the return value will be a list.
         """
         raise NotImplementedError()
+
+
+class ImagineApiMidjourneyGenerator(ImageGenerator):
+    def __init__(self, api_base='https://cl.imagineapi.dev', api_key=None):
+        self.api_base = api_base
+        self.api_key = api_key
+        self.url = f'{self.api_base}/items/images/'
+
+    @property
+    def is_multiple(self) -> bool:
+        return True
+
+    @property
+    def num_multiple(self) -> int:
+        return 4
+
+    async def generate_image(self, prompt: str, allow_revised_prompt: bool = True, **kwargs) -> List[Dict[str, Any]]:
+        seed = kwargs.get('seed', 0)
+        headers = {'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self.url, headers=headers, json=dict(prompt=prompt + f' --seed {seed}')) as response:
+                    response = await response.json()
+                    finished = False
+
+                    while not finished:
+                        async with session.get(f"{self.url}{response['data']['id']}", headers=headers) as response_data:
+                            response_data = await response_data.json()
+
+                            if response_data['data']['status'] in {'completed', 'failed'}:
+                                finished = True
+                            else:
+                                await asyncio.sleep(5)
+
+                    if response_data['data']['status'] == 'failed':
+                        return None
+                    else:
+                        images = []
+
+                        for image_url in response_data['data']['upscaled_urls']:
+                            async with aiohttp.ClientSession() as session, session.get(image_url, timeout=60) as r:
+                                content = await r.read()
+                                images.append(dict(image=Image.open(BytesIO(content)), revised_prompt=prompt))
+
+                        return images
+        except:
+            import traceback
+            traceback.print_exc()
+
+            return None
 
 
 class StableDiffusion2ImageGenerator(ImageGenerator):
@@ -137,46 +103,37 @@ class StableDiffusion2ImageGenerator(ImageGenerator):
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
         self.pipe = pipe.to('cuda')
 
-    def is_multiprocessable(self) -> bool:
-        return False
-
-    def generate_image(self, prompt: str, **kwargs) -> Image:
-        return self.pipe(prompt=prompt, **kwargs).images[0]
+    async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
+        set_seed(kwargs.get('seed', 0))
+        return dict(image=self.pipe(prompt=prompt, num_inference_steps=30, guidance_scale=5.0, **kwargs).images[0], revised_prompt=prompt)
 
 
 class StableDiffusionXLImageGenerator(ImageGenerator):
-    def __init__(self):
+    def __init__(self, device_idx: int = 0):
         pipe = DiffusionPipeline.from_pretrained(
             'stabilityai/stable-diffusion-xl-base-1.0',
             torch_dtype=torch.float16,
             use_safetensors=True,
             variant='fp16'
         )
-        pipe.to('cuda')
+        pipe.to(f'cuda:{device_idx}')
         self.pipe = pipe
 
-    def is_multiprocessable(self) -> bool:
-        return False
+    async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
+        set_seed(kwargs.get('seed', 0))
+        image = self.pipe(prompt=prompt, num_inference_steps=30, add_watermarker=False, **kwargs).images[0]
 
-    def generate_image(self, prompt: str, **kwargs) -> Image:
-        return self.pipe(prompt=prompt, add_watermarker=False, **kwargs).images[0]
-
-
-def clean_prompt(prompt: str) -> str:
-    prompt = prompt.lower().strip()
-    ps = PorterStemmer()
-    prompt = ' '.join(ps.stem(word) for word in nltk.tokenize.word_tokenize(prompt) if word not in stop_words)
-
-    return prompt
+        return dict(image=image, revised_prompt=prompt)
 
 
 class AzureOpenAIImageGenerator(ImageGenerator):
-    def __init__(self, api_base=None, api_key=None, deployment_name=None, api_version='2024-02-01'):
+    def __init__(self, api_base=None, api_key=None, deployment_name=None, api_version='2024-02-01', num_parallel=2):
         self.api_base = api_base
         self.api_key = api_key
         self.deployment_name = deployment_name
         self.api_version = api_version
         self.url = f'{self.api_base}/openai/deployments/{self.deployment_name}/images/generations?api-version={self.api_version}'
+        self.semaphore = asyncio.Semaphore(num_parallel)
 
     @classmethod
     def parse_from_path(cls, path: Path | str) -> List['AzureOpenAIImageGenerator']:
@@ -203,51 +160,58 @@ class AzureOpenAIImageGenerator(ImageGenerator):
 
         return [cls(**d) for d in json.loads(path.read_text())]
 
-    def generate_image(self, prompt: str, allow_revised_prompt: bool = True, **kwargs) -> Image:
+    async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
         """
         Generates an image from a prompt using Azure's OpenAI API.
 
         Args:
             prompt: The prompt to generate an image from.
-            allow_revised_prompt: Whether to allow prompt revision.
-            **kwargs: Additional arguments to pass to the API. Valid keys are `'quality'` and `'style'`. Quality can be
-                one of `'hd'` or `'standard'`, and style one of `'vivid'` or `'natural'`.
+            **kwargs: Additional arguments to pass to the API. Valid keys are `'quality'`, `'style'`, and `'seed'`.
+                Quality can be one of `'hd'` or `'standard'`, and style one of `'vivid'` or `'natural'`.
 
         Returns:
             The generated image as a Pillow Image.
 
         Raises:
-            requests.exceptions.Timeout: If the request times out.
+            asyncio.exceptions.TimeoutError: If the request times out.
             KeyError: If the returned JSON does not contain the appropriate keys.
         """
-        return_dict = requests.post(
-            self.url,
-            headers={'api-key': self.api_key, 'Content-Type': 'application/json'},
-            json=dict(prompt=prompt, size='1024x1024', n=1, **kwargs),
-            timeout=60,
-        ).json()
+        if 'quality' not in kwargs:
+            kwargs['quality'] = 'hd'
 
-        try:
-            if not allow_revised_prompt:
-                match return_dict['data'][0]:
-                    case {'revised_prompt': revised_prompt}:
-                        print('Revision: ', revised_prompt)
-                        prompt = clean_prompt(prompt)
-                        revised_prompt = clean_prompt(revised_prompt)
+        if 'style' not in kwargs:
+            kwargs['style'] = 'vivid'
 
-                        if editdistance.eval(revised_prompt, prompt) >= 3:
-                            logging.error(f'Prompt was revised to "{revised_prompt}"')
-                            return None
+        while True:
+            try:
+                prompt_fix = 'I NEED to test how the tool works with extremely simple prompts. DO NOT add any detail, just use it AS-IS: '
 
-            time.sleep(1)  # allow time for saving the image
+                async with self.semaphore, aiohttp.ClientSession() as session:
+                    async with session.post(
+                        self.url,
+                        headers={'api-key': self.api_key, 'Content-Type': 'application/json'},
+                        json=dict(prompt=prompt_fix + prompt, size='1024x1024', n=1, **kwargs),
+                        timeout=60,
+                    ) as response:
+                        return_dict = await response.json()
 
-            return Image.open(BytesIO(requests.get(return_dict['data'][0]['url'], timeout=60).content))
-        except KeyError:
-            match return_dict:
-                case {'error': {'code': 'tooManyRequests'}}:
-                    logging.error('Too many requests!')
-                    raise
+                revised_prompt = prompt
+                time.sleep(1)  # allow time for saving the image
 
-            logging.error(str(return_dict))
+                async with aiohttp.ClientSession() as session, session.get(return_dict['data'][0]['url'], timeout=60) as r:
+                    content = await r.read()
 
-            return None
+                return dict(
+                    image=Image.open(BytesIO(content)),
+                    revised_prompt=revised_prompt
+                )
+            except KeyError:
+                match return_dict:
+                    case {'error': {'code': '429'}}:
+                        continue  # retry if rate limited
+
+                logging.error(str(return_dict))
+
+                return None
+            except asyncio.exceptions.TimeoutError:
+                continue

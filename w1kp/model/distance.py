@@ -1,9 +1,47 @@
+__all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure']
+
 from typing import List
 
+import lpips
 import numpy as np
+import torch
 from PIL.Image import Image
 
-__all__ = ['RGBColorFeatureExtractor']
+
+class PairwiseDistanceMeasure:
+    def __call__(self, prompt: str, image1: Image, image2: Image) -> float:
+        raise NotImplementedError
+
+
+class LPIPSDistanceMeasure(PairwiseDistanceMeasure):
+    def __init__(self, network: str = 'alex'):
+        self.lpips = lpips.LPIPS(net=network)
+        self.device = 'cpu'
+
+        if torch.cuda.is_available():
+            self.lpips = self.lpips.cuda()
+            self.device = 'cuda'
+
+    def __call__(self, prompt: str, image1: Image, image2: Image) -> float:
+        # Downsample to 64x64
+        image1 = image1.resize((64, 64))
+        image2 = image2.resize((64, 64))
+
+        # Convert to tensor
+        image1 = torch.tensor(np.array(image1)).permute(2, 0, 1).float() / 255
+        image2 = torch.tensor(np.array(image2)).permute(2, 0, 1).float() / 255
+
+        # Normalize to [-1, 1]
+        image1 = image1 * 2 - 1
+        image2 = image2 * 2 - 1
+
+        # Tensor to GPU
+        image1 = image1.unsqueeze(0)
+        image2 = image2.unsqueeze(0)
+        image1 = image1.to(self.device)
+        image2 = image2.to(self.device)
+
+        return self.lpips(image1, image2).item()
 
 
 class RGBColorFeatureExtractor:

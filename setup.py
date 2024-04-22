@@ -13,6 +13,7 @@ setuptools.setup(
     python_requires='>=3.10',
     entry_points={
         'console_scripts': [
+            'w1kp_generate=w1kp.run:generate'
         ]
     }
 )
