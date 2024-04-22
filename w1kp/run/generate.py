@@ -6,8 +6,7 @@ from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 
 from w1kp import PromptDataset, AzureOpenAIImageGenerator, GenerationExperiment, StableDiffusionXLImageGenerator, \
-    StableDiffusion2ImageGenerator
-from w1kp.image_generator import ImagineApiMidjourneyGenerator
+    StableDiffusion2ImageGenerator, ImagineApiMidjourneyGenerator
 
 
 async def amain():

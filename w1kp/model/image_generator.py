@@ -1,3 +1,6 @@
+__all__ = ['ImageGenerator', 'AzureOpenAIImageGenerator', 'StableDiffusionXLImageGenerator',
+           'StableDiffusion2ImageGenerator', 'ImagineApiMidjourneyGenerator']
+
 import asyncio
 import json
 import logging
@@ -8,15 +11,10 @@ from typing import List, Dict, Any
 
 import aiohttp
 from diffusers import DiffusionPipeline, StableDiffusionPipeline, DPMSolverMultistepScheduler
+from PIL import Image
 import torch
 
-from PIL import Image
-
-
-__all__ = ['ImageGenerator', 'AzureOpenAIImageGenerator', 'StableDiffusionXLImageGenerator',
-           'StableDiffusion2ImageGenerator']
-
-from .utils import set_seed
+from ..utils import set_seed
 
 
 class ImageGenerator:

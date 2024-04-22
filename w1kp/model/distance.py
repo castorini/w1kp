@@ -1,5 +1,6 @@
-__all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure']
+__all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure']
 
+import itertools
 from typing import List
 
 import lpips
@@ -8,9 +9,51 @@ import torch
 from PIL.Image import Image
 
 
+class ListwiseDistanceMeasure:
+    def __call__(self, prompt: str, images: List[Image], **kwargs) -> float:
+        raise NotImplementedError
+
+
+class PairsListwiseDistanceMeasure(ListwiseDistanceMeasure):
+    def __init__(self, pairwise_measure: 'PairwiseDistanceMeasure', num_sample: int = None):
+        self.pairwise_measure = pairwise_measure
+        self.num_sample = num_sample
+
+    def __call__(self, prompt: str, images: List[Image], debug: bool = False) -> float:
+        n = len(images)
+        total_distance = 0
+        distances = []
+        combs = np.array(list(itertools.combinations(range(n), 2)))
+
+        if self.num_sample is not None:
+            num_sample = min(self.num_sample, len(combs))
+            combs = combs[np.random.choice(np.arange(len(combs)), num_sample, replace=False)]
+
+        for i, j in combs:
+            d = self.pairwise_measure(prompt, images[i], images[j])
+            total_distance += d
+
+            if debug:
+                distances.append(((i, j), d))
+
+        if debug:
+            distances = sorted(distances, key=lambda x: x[1])
+
+            for ij, dist in distances[:3]:
+                print('min', ij, dist)
+
+            for ij, dist in distances[-3:]:
+                print('max', ij, dist)
+
+        return total_distance / len(combs)
+
+
 class PairwiseDistanceMeasure:
     def __call__(self, prompt: str, image1: Image, image2: Image) -> float:
         raise NotImplementedError
+
+    def to_listwise(self, num_sample: int = None) -> ListwiseDistanceMeasure:
+        return PairsListwiseDistanceMeasure(self, num_sample=num_sample)
 
 
 class LPIPSDistanceMeasure(PairwiseDistanceMeasure):

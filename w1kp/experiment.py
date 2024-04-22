@@ -79,6 +79,16 @@ class GenerationExperiment:
         return experiments
 
     @classmethod
+    def iter_by_id(cls, folder: Path | str, model_name: str = 'UNSPECIFIED') -> List['GenerationExperiment']:
+        folder = Path(folder) / model_name
+
+        for f_id in folder.iterdir():
+            if not f_id.is_dir():
+                continue
+
+            yield cls.load_all_seeds(folder.parent, f_id.name, model_name=model_name)
+
+    @classmethod
     def load_all(cls, folder: Path | str) -> List['GenerationExperiment']:
         experiments = []
         folder = Path(folder)
