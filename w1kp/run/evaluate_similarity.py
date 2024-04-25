@@ -20,8 +20,8 @@ async def amain():
     args = parser.parse_args()
 
     if args.action == 'debug':
-        experiments1 = GenerationExperiment.load_all_seeds(args.input_folder, '0', model_name=args.model)
-        experiments2 = GenerationExperiment.load_all_seeds(args.input_folder, '1', model_name=args.model)
+        experiments1 = list(GenerationExperiment.iter_by_seed(args.input_folder, '0', model_name=args.model))
+        experiments2 = list(GenerationExperiment.iter_by_seed(args.input_folder, '1', model_name=args.model))
 
         measure = LPIPSDistanceMeasure()
         within_measures1 = []

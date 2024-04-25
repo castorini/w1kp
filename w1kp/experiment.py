@@ -1,14 +1,16 @@
 __all__ = ['GenerationExperiment', 'Comparison2AFCExperiment', 'synthesize_2afc_experiments']
 
+from contextlib import closing
 from dataclasses import dataclass
 import itertools
 from pathlib import Path
 import random
-from typing import List
+from typing import List, Tuple
 import uuid
 
 from PIL.Image import Image
 import PIL.Image
+from matplotlib import pyplot as plt
 from pydantic import BaseModel
 
 
@@ -53,7 +55,12 @@ class GenerationExperiment:
         return cls(prompt, id=folder.parent.name, root_folder=folder.parent.parent.parent, model_name=model_name, seed=seed)
 
     @classmethod
-    def load_all_seeds(cls, folder: Path | str, id: str, model_name: str = 'UNSPECIFIED') -> List['GenerationExperiment']:
+    def get_ids(cls, folder: Path | str, model_name: str = 'UNSPECIFIED') -> List[str]:
+        folder = Path(folder) / model_name
+        return [f.name for f in folder.iterdir() if f.is_dir()]
+
+    @classmethod
+    def iter_by_seed(cls, folder: Path | str, id: str, model_name: str = 'UNSPECIFIED') -> List['GenerationExperiment']:
         experiments = []
         folder = Path(folder) / model_name / id
 
@@ -64,36 +71,22 @@ class GenerationExperiment:
             seed = f_seed.name
 
             if (f_seed / 'image.png').exists():
-                experiments.append(cls.from_folder(f_seed, model_name=model_name, seed=seed))
+                yield cls.from_folder(f_seed, model_name=model_name, seed=seed)
 
         return experiments
 
     @classmethod
-    def load_all_ids(cls, folder: Path | str, model_name: str = 'UNSPECIFIED') -> List['GenerationExperiment']:
-        experiments = []
+    def iter_by_id(cls, folder: Path | str, model_name: str = 'UNSPECIFIED') -> List[List['GenerationExperiment']]:
         folder = Path(folder) / model_name
 
         for f_id in folder.iterdir():
             if not f_id.is_dir():
                 continue
 
-            experiments.extend(cls.load_all_seeds(folder, f_id.name, model_name=model_name))
-
-        return experiments
+            yield list(cls.iter_by_seed(folder.parent, f_id.name, model_name=model_name))
 
     @classmethod
-    def iter_by_id(cls, folder: Path | str, model_name: str = 'UNSPECIFIED') -> List['GenerationExperiment']:
-        folder = Path(folder) / model_name
-
-        for f_id in folder.iterdir():
-            if not f_id.is_dir():
-                continue
-
-            yield cls.load_all_seeds(folder.parent, f_id.name, model_name=model_name)
-
-    @classmethod
-    def load_all(cls, folder: Path | str) -> List['GenerationExperiment']:
-        experiments = []
+    def iter_all(cls, folder: Path | str) -> List['GenerationExperiment']:
         folder = Path(folder)
 
         for f_model in folder.iterdir():
@@ -101,9 +94,9 @@ class GenerationExperiment:
                 continue
 
             model_name = f_model.name
-            experiments.extend(cls.load_all_ids(folder, model_name=model_name))
 
-        return experiments
+            for exp in cls.iter_by_id(folder, model_name=model_name):
+                yield exp
 
     def save(self, root_folder: Path | str = None, overwrite: bool = False):
         if not self.id:
@@ -128,21 +121,21 @@ def _to_2afc_exp(
         attention_check: bool = False,
 ) -> 'Comparison2AFCExperiment':
     if random.random() < 0.5:
-        id1, id2 = exp1.id, exp2.id
-        attn_gt = exp1.id
+        seed1, seed2 = exp1.seed, exp2.seed
+        attn_gt = exp1.seed
     else:
-        id1, id2 = exp2.id, exp1.id
-        attn_gt = exp2.id
+        seed1, seed2 = exp2.seed, exp1.seed
+        attn_gt = exp2.seed
 
     if attention_check:
-        ref_id = id1
+        ref_seed = seed1
         kw = dict(ground_truth=attn_gt)
     else:
-        ref_id = ref_exp.id
+        ref_seed = ref_exp.seed
         kw = {}
 
     return Comparison2AFCExperiment(
-        ref_id=ref_id, id1=id1, id2=id2, seed=exp1.seed, root_folder=root_folder, model_name=exp1.model_name, **kw
+        ref_seed=ref_seed, seed1=seed1, seed2=seed2, id=exp1.id, root_folder=root_folder, model_name=exp1.model_name, **kw
     )
 
 
@@ -178,9 +171,9 @@ def synthesize_2afc_experiments(
                 exp1, exp2, ref_exp = random.sample(experiments, 3)
                 exp = _to_2afc_exp(exp1, exp2, ref_exp, root_folder, attention_check)
 
-                if (exp.id1, exp.id2, exp.ref_id) not in chosen_pairs:
+                if (exp.seed1, exp.seed2, exp.ref_seed) not in chosen_pairs:
                     is_duplicate = False
-                    chosen_pairs.add((exp.id1, exp.id2, exp.ref_id))
+                    chosen_pairs.add((exp.seed1, exp.seed2, exp.ref_seed))
 
                     yield exp
     elif strategy == 'pairwise':
@@ -195,32 +188,77 @@ def synthesize_2afc_experiments(
 
 class Comparison2AFCExperiment(BaseModel):
     """Serializable representation of a single 2AFC experiment."""
-    ref_id: str
-    id1: str
-    id2: str
-    seed: str
-    root_folder: Path
+    ref_seed: str
+    seed1: str
+    seed2: str
+    id: str
+    root_folder: Path | None
     model_name: str = 'UNSPECIFIED'
-    id: str = None
     ground_truth: str = None  # only specified if the ground truth is known
 
-    def model_post_init(self):
+    def __repr__(self):
+        return f'2AFC<<{self.id1} vs. {self.id2} (ref: {self.ref_id}; gt: {self.ground_truth})>>'
+
+    def model_post_init(self, *args, **kwargs):
         self.root_folder = Path(self.root_folder)
 
-        if self.id is None:
-            self.id = str(uuid.uuid4())
+    def get_gen_path(self, seed: str, filename: str = '.') -> Path:
+        return Path(self.root_folder) / self.model_name / self.id / seed / filename
 
-    def get_gen_path(self, id: str, filename: str = '.') -> Path:
-        return Path(self.root_folder) / self.model_name / id / self.seed / filename
+    def get_comparison_path(self) -> Path:
+        seed1, seed2, ref_seed = self.seed1, self.seed2, self.ref_seed
 
-    def load_images(self):
-        # Lazy loading
-        self.ref_image = PIL.Image.open(str(self.get_gen_path(self.ref_id, 'image.png')))
-        self.image1 = PIL.Image.open(str(self.get_gen_path(self.id1, 'image.png')))
-        self.image2 = PIL.Image.open(str(self.get_gen_path(self.id2, 'image.png')))
+        return Path(self.root_folder) / self.model_name / self.id / f'comparison-{seed1}-{seed2}-{ref_seed}.jpg'
+
+    def load_comparison_image(self) -> PIL.Image.Image:
+        return PIL.Image.open(str(self.get_comparison_path()))
+
+    def create_comparison_image(self):
+        plt.clf()
+        fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+
+        # Set titles
+        ax[0].set_title('Image A')
+        ax[1].set_title('REFERENCE')
+        ax[1].title.set_color('red')
+        ax[2].set_title('Image B')
+
+        # Set bold
+        for axi in ax:
+            axi.set_title(axi.get_title(), fontweight='bold')
+
+        # Make font larger
+        for axi in ax:
+            axi.title.set_fontsize(24)
+
+        ax[0].set_axis_off()
+        ax[1].set_axis_off()
+        ax[2].set_axis_off()
+
+        im1, im2, ref_im = self.load_exp_images()
+
+        try:
+            ax[0].imshow(im1)
+            ax[1].imshow(ref_im)
+            ax[2].imshow(im2)
+        finally:
+            im1.close()
+            im2.close()
+            ref_im.close()
+
+        plt.savefig(self.get_comparison_path(), bbox_inches='tight')
+        plt.close(fig)
+
+    def load_exp_images(self) -> Tuple[PIL.Image.Image, PIL.Image.Image, PIL.Image.Image]:
+        ref_image = PIL.Image.open(str(self.get_gen_path(self.ref_seed, 'image.png')))
+        image1 = PIL.Image.open(str(self.get_gen_path(self.seed1, 'image.png')))
+        image2 = PIL.Image.open(str(self.get_gen_path(self.seed2, 'image.png')))
+
+        return image1, image2, ref_image
 
     @classmethod
-    def from_file(cls, path: Path | str) -> 'List[Comparison2AFCExperiment]':
+    def from_folder(cls, path: Path | str) -> 'List[Comparison2AFCExperiment]':
+        path = Path(path) / '2afc.jsonl'
         lines = path.read_text().splitlines()
         experiments = []
 
@@ -231,13 +269,12 @@ class Comparison2AFCExperiment(BaseModel):
 
         return experiments
 
-    @staticmethod
-    def save_all(self, experiments: 'List[Comparison2AFCExperiment]', path: Path | str):
-        if not self.id:
-            self.id = uuid.uuid4().hex
+    def save(self):
+        old_root = self.root_folder
 
-        path = Path(path)
-
-        with path.open('w') as f:
-            for exp in experiments:
-                print(exp.json(), file=f)
+        with (self.root_folder / '2afc.jsonl').open('a') as f:
+            try:
+                self.root_folder = None
+                print(self.model_dump_json(exclude_none=True), file=f)
+            finally:
+                self.root_folder = old_root
