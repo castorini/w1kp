@@ -11,10 +11,12 @@ from tqdm import tqdm, trange
 
 from w1kp import GenerationExperiment, LPIPSDistanceMeasure, HitBatch, CLIPDistanceMeasure, ViTDistanceMeasure, \
     DinoV2DistanceMeasure, LPIPSCollator
+from w1kp.model.distance import DISTSDistanceMeasure
 
 
 async def amain():
-    choices = ['lpips-alex', 'lpips-vgg', 'lpips-squeeze', 'clip', 'vit', 'oracle', 'dino-v2']
+    choices = ['lpips-alex', 'lpips-vgg', 'lpips-squeeze', 'clip', 'vit', 'oracle', 'dino-v2', 'dists',
+               'stlpips-alex', 'stlpips-vgg']
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-file', '-i', type=str, required=True)
@@ -25,6 +27,8 @@ async def amain():
     parser.add_argument('--lr', '-lr', type=float, default=3e-5)
     parser.add_argument('--num-epochs', '-ne', type=int, default=5)
     parser.add_argument('--eval-only', '-eo', action='store_true')
+    parser.add_argument('--weights-path', type=str)
+    parser.add_argument('--loss-type', type=str, choices=['bce', 'bce-rank'], default='bce')
     args = parser.parse_args()
 
     batch = HitBatch.from_csv(args.input_file, approved_only=True, remove_attention_checks=True)
@@ -36,15 +40,22 @@ async def amain():
             measure = LPIPSDistanceMeasure(network='vgg')
         case 'lpips-squeeze':
             measure = LPIPSDistanceMeasure(network='squeeze')
+        case 'stlpips-alex':
+            measure = LPIPSDistanceMeasure(network='alex', shift_tolerant=True)
+        case 'stlpips-vgg':
+            measure = LPIPSDistanceMeasure(network='vgg', shift_tolerant=True)
         case 'clip':
             measure = CLIPDistanceMeasure()
         case 'vit':
             measure = ViTDistanceMeasure()
         case 'dino-v2':
             measure = DinoV2DistanceMeasure()
+        case 'dists':
+            measure = DISTSDistanceMeasure(args.weights_path)
         case _:
             measure = None
 
+    measure.set_loss_type(args.loss_type)
     train_batch, test_batch = batch.split(args.train_pct)
 
     if not args.eval_only and not args.num_epochs == 0:
