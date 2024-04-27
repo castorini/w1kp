@@ -195,9 +195,13 @@ class Comparison2AFCExperiment(BaseModel):
     root_folder: Path | None
     model_name: str = 'UNSPECIFIED'
     ground_truth: str = None  # only specified if the ground truth is known
+    judgement: float | None = None
 
     def __repr__(self):
         return f'2AFC<<{self.id1} vs. {self.id2} (ref: {self.ref_id}; gt: {self.ground_truth})>>'
+
+    def load_prompt(self) -> str:
+        return (self.root_folder / self.model_name / self.id / self.seed1 / 'prompt.txt').read_text()
 
     def model_post_init(self, *args, **kwargs):
         self.root_folder = Path(self.root_folder)

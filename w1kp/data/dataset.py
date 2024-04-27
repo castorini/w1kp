@@ -1,14 +1,18 @@
-__all__ = ['PromptDataset', 'LPIPSDataset']
+__all__ = ['PromptDataset', 'LPIPSDataset', 'LPIPSCollator']
 
+import random
+from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Dict
 
+import torch
 from datasets import load_dataset
-import joblib
 import numpy as np
 from PIL import Image
 import torch.utils.data as tud
-from tqdm import tqdm
+
+from .experiment import Comparison2AFCExperiment
+from ..utils import cached_load_image
 
 
 class PromptDataset(tud.Dataset):
@@ -47,12 +51,58 @@ class PromptDataset(tud.Dataset):
         return cls.from_dataset('poloclub/diffusiondb', split, 'prompt', **kwargs)
 
 
+class LPIPSCollator:
+    def __init__(self, processor):
+        self.processor = processor
+        self.training = False
+
+    def train(self):
+        self.training = True
+
+    def eval(self):
+        self.training = False
+
+    def __call__(self, batch: List[Dict[str, Image.Image | float | str | None]]) -> Dict[str, List[Image.Image | float | str | None]]:
+        images1 = [item['image1'] for item in batch]
+        images2 = [item['image2'] for item in batch]
+        ref_images = [item['ref_image'] for item in batch]
+        judgement = [item['judgement'] for item in batch]
+        prompts = [item['prompt'] for item in batch]
+
+        inputs1 = self.processor(images=images1, return_tensors='pt')
+        inputs2 = self.processor(images=images2, return_tensors='pt')
+        ref_inputs = self.processor(images=ref_images, return_tensors='pt')
+        judgements = torch.Tensor(judgement)
+
+        if self.training:
+            # Randomly add equal amounts of noise to the images
+            if random.random() < 0.5:
+                noise = torch.randn_like(inputs1['pixel_values']) * 0.01
+                inputs1['pixel_values'] += noise
+                inputs2['pixel_values'] += noise
+                ref_inputs['pixel_values'] += noise
+
+            # Randomly flip all the images horizontally
+            if random.random() < 0.5:
+                inputs1['pixel_values'] = torch.flip(inputs1['pixel_values'], dims=[3])
+                inputs2['pixel_values'] = torch.flip(inputs2['pixel_values'], dims=[3])
+                ref_inputs['pixel_values'] = torch.flip(ref_inputs['pixel_values'], dims=[3])
+
+        return dict(
+            image1=inputs1['pixel_values'],
+            image2=inputs2['pixel_values'],
+            ref_image=ref_inputs['pixel_values'],
+            judgement=judgements,
+            prompt=prompts
+        )
+
+
 class LPIPSDataset(tud.Dataset):
     def __init__(
             self,
-            images1: List[Image.Image],
-            images2: List[Image.Image],
-            ref_images: List[Image.Image],
+            images1: List[Path],
+            images2: List[Path],
+            ref_images: List[Path],
             judgements: List[float],
             prompts: List[str] = None,
     ):
@@ -62,12 +112,39 @@ class LPIPSDataset(tud.Dataset):
         self.judgements = judgements
         self.prompts = prompts
 
+    def split(self, train_pct: int) -> Tuple['LPIPSDataset', 'LPIPSDataset']:
+        old_state = random.getstate()
+        random.seed(0)
+
+        data1 = defaultdict(list)
+        data2 = defaultdict(list)
+
+        for i in range(len(self)):
+            data = data1 if 100 * random.random() < train_pct else data2
+            data['images1'].append(self.images1[i])
+            data['images2'].append(self.images2[i])
+            data['ref_images'].append(self.ref_images[i])
+            data['judgements'].append(self.judgements[i])
+
+            if self.prompts:
+                data['prompts'].append(self.prompts[i])
+
+        random.setstate(old_state)
+
+        return LPIPSDataset(**data1), LPIPSDataset(**data2)
+
     def __getitem__(self, item: int) -> Dict[str, Image.Image | float | str | None]:
         im1, im2, ref_im = self.images1[item], self.images2[item], self.ref_images[item]
         judgement = self.judgements[item]
         prompt = self.prompts[item] if self.prompts is not None else None
 
-        return dict(image1=im1, image2=im2, ref_image=ref_im, judgement=judgement, prompt=prompt)
+        ims = []
+
+        for im in (im1, im2, ref_im):
+            im_ = cached_load_image(str(im))
+            ims.append(im_)
+
+        return dict(image1=ims[0], image2=ims[1], ref_image=ims[2], judgement=judgement, prompt=prompt)
 
     def __len__(self) -> int:
         return len(self.images1)
@@ -91,6 +168,16 @@ class LPIPSDataset(tud.Dataset):
             self.judgements + other.judgements,
             self.prompts + other.prompts if self.prompts is not None and other.prompts is not None else None
         )
+
+    @classmethod
+    def from_experiments(cls, experiments: List[Comparison2AFCExperiment]):
+        images1 = [exp.get_gen_path(exp.seed1, 'image.png') for exp in experiments]
+        images2 = [exp.get_gen_path(exp.seed2, 'image.png') for exp in experiments]
+        ref_images = [exp.get_gen_path(exp.ref_seed, 'image.png') for exp in experiments]
+        judgements = [exp.judgement for exp in experiments]
+        prompts = [exp.load_prompt() for exp in experiments]
+
+        return cls(images1, images2, ref_images, judgements, prompts)
 
     @classmethod
     def from_folder(cls, path: str, resize: int = 64) -> 'LPIPSDataset':
@@ -124,9 +211,9 @@ class LPIPSDataset(tud.Dataset):
 
         path = Path(path)
 
-        images1 = joblib.Parallel(n_jobs=joblib.cpu_count())(joblib.delayed(image_open)(p) for p in tqdm(list(sorted(path.glob('p0/*.png')))))
-        images2 = joblib.Parallel(n_jobs=joblib.cpu_count())(joblib.delayed(image_open)(p) for p in tqdm(list(sorted(path.glob('p1/*.png')))))
-        ref_images = joblib.Parallel(n_jobs=joblib.cpu_count())(joblib.delayed(image_open)(p) for p in tqdm(list(sorted(path.glob('ref/*.png')))))
+        images1 = list(sorted(path.glob('p0/*.png')))
+        images2 = list(sorted(path.glob('p1/*.png')))
+        ref_images = list(sorted(path.glob('ref/*.png')))
         judgements = [float(np.load(p)[0]) for p in sorted(path.glob('judge/*.npy'))]
 
         prompts = None
