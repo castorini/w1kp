@@ -192,7 +192,8 @@ class Comparison2AFCExperiment(BaseModel):
     seed1: str
     seed2: str
     id: str
-    root_folder: Path | None
+    id2: str | None = None
+    root_folder: Path | None = None
     model_name: str = 'UNSPECIFIED'
     ground_truth: str = None  # only specified if the ground truth is known
     judgement: float | None = None
@@ -204,10 +205,12 @@ class Comparison2AFCExperiment(BaseModel):
         return (self.root_folder / self.model_name / self.id / self.seed1 / 'prompt.txt').read_text()
 
     def model_post_init(self, *args, **kwargs):
-        self.root_folder = Path(self.root_folder)
+        if self.root_folder is not None:
+            self.root_folder = Path(self.root_folder)
 
-    def get_gen_path(self, seed: str, filename: str = '.') -> Path:
-        return Path(self.root_folder) / self.model_name / self.id / seed / filename
+    def get_gen_path(self, seed: str, filename: str = '.', is_id2: bool = False) -> Path:
+        id = self.id2 if is_id2 and self.id2 else self.id
+        return Path(self.root_folder) / self.model_name / id / seed / filename
 
     def get_comparison_path(self) -> Path:
         seed1, seed2, ref_seed = self.seed1, self.seed2, self.ref_seed
@@ -256,7 +259,7 @@ class Comparison2AFCExperiment(BaseModel):
     def load_exp_images(self) -> Tuple[PIL.Image.Image, PIL.Image.Image, PIL.Image.Image]:
         ref_image = PIL.Image.open(str(self.get_gen_path(self.ref_seed, 'image.png')))
         image1 = PIL.Image.open(str(self.get_gen_path(self.seed1, 'image.png')))
-        image2 = PIL.Image.open(str(self.get_gen_path(self.seed2, 'image.png')))
+        image2 = PIL.Image.open(str(self.get_gen_path(self.seed2, 'image.png', is_id2=True)))
 
         return image1, image2, ref_image
 

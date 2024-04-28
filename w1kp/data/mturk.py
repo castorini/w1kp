@@ -3,6 +3,7 @@ __all__ = ['HitBatch']
 import random
 import re
 from collections import defaultdict
+from math import ceil
 from pathlib import Path
 from typing import Dict, Generator, Any, List, Tuple
 
@@ -73,7 +74,7 @@ class HitBatch:
         random.seed(0)
         train_rows, test_rows = [], []
 
-        df = self.df.groupby(['model', 'id'])
+        df = self.df.groupby(['id'])  # group by prompt ID
 
         for _, group in df:
             data = train_rows if 100 * random.random() < train_pct else test_rows
@@ -92,15 +93,19 @@ class HitBatch:
         return HitBatch(pd.DataFrame(train_rows)), HitBatch(pd.DataFrame(test_rows))
 
     @classmethod
-    def from_csv(cls, path: str, approved_only: bool = False, remove_attention_checks: bool = False):
+    def from_csv(cls, *paths: str, approved_only: bool = False, remove_attention_checks: bool = False):
         def is_attention_check(url: str) -> bool:
             d = extract_info_from_url(url)
             return d['seed1'] == d['ref_seed'] or d['seed2'] == d['ref_seed']
 
-        df = pd.read_csv(path)
+        dfs = [pd.read_csv(path) for path in paths]
+        df = pd.concat(dfs)
 
         if approved_only:
-            df = df[df['AssignmentStatus'] == 'Approved']
+            if 'Approve' in df.columns:
+                df = df[(df['AssignmentStatus'] == 'Approved') | (df['Approve'] == 'x')]
+            else:
+                df = df[df['AssignmentStatus'] == 'Approved']
 
         if remove_attention_checks:
             df = df[~df['Input.image_url'].apply(is_attention_check)]
@@ -109,7 +114,12 @@ class HitBatch:
 
         return cls(df)
 
-    def to_lpips_dataset(self, image_root_folder: Path) -> 'LPIPSDataset':
+    def to_lpips_dataset(
+            self,
+            image_root_folder: Path,
+            negative_sampling_pct: int = 0,
+            include_low_confidence: bool = True,
+    ) -> 'LPIPSDataset':
         exps = []
 
         for rows in self.iter_group_by_seed():
@@ -117,15 +127,38 @@ class HitBatch:
             choices = [row.choice for row in rows]
             a_pct = choices.count('a') / len(choices)
             exp.judgement = a_pct
+
+            if abs(a_pct - 0.5) < 0.2 and not include_low_confidence:
+                continue
+
             exps.append(exp)
+
+        if negative_sampling_pct > 0:
+            groups = list(self.iter_group_by_id())
+
+            for _ in range((negative_sampling_pct * len(exps)) // 100):
+                group1, group2 = random.sample(groups, 2)
+                exp1 = random.choice(group1).load_comparison_experiment(image_root_folder)
+                exp2 = random.choice(group2).load_comparison_experiment(image_root_folder)
+                exp1.judgement = 1.0
+                exp1.id2 = exp2.id
+                exp1.seed2 = exp2.seed1
+                exps.append(exp1)
 
         return LPIPSDataset.from_experiments(exps)
 
     def iter_by_row(self) -> Generator[HitRow, Any, None]:
         return iter(self)
 
-    def iter_group_by_seed(self) -> Generator[List[HitRow], Any, None]:
+    def iter_group_by_seed(self, limit_odd: bool = True) -> Generator[List[HitRow], Any, None]:
         df = self.df.groupby(['model', 'id', 'ref_seed', 'seed1', 'seed2'])
+
+        for _, group in df:
+            limit = (ceil(len(group) / 2) * 2 - 1) if limit_odd else len(group)
+            yield [HitRow(row) for _, row in group.iterrows()][:limit]
+
+    def iter_group_by_id(self) -> Generator[List[HitRow], Any, None]:
+        df = self.df.groupby(['model', 'id'])
 
         for _, group in df:
             yield [HitRow(row) for _, row in group.iterrows()]

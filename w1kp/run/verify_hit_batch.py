@@ -21,6 +21,9 @@ def main():
     pass_workers_ids = set(batch.df['WorkerId'].unique().tolist())
 
     for row in batch:
+        if row['AssignmentStatus'] != 'Submitted':
+            continue
+
         data = row.extract_info_from_url()
         fail = False
 
@@ -41,12 +44,14 @@ def main():
 
     # Mark rows appropriately
     for wid in fail_workers_ids:
-        batch.df.loc[batch.df['WorkerId'] == wid, 'Reject'] = 'One or more attention checks failed.'
+        batch.old_df.loc[batch.old_df['WorkerId'] == wid, 'Reject'] = 'One or more attention checks failed.'
 
     for wid in pass_workers_ids:
-        batch.df.loc[batch.df['WorkerId'] == wid, 'Approve'] = 'x'
+        batch.old_df.loc[batch.old_df['WorkerId'] == wid, 'Approve'] = 'x'
 
-    batch.df.to_csv(args.output_file, index=False)
+    batch.old_df.loc[batch.old_df['AssignmentStatus'] == 'Approved', 'Approve'] = 'x'
+    batch.old_df.loc[batch.old_df['AssignmentStatus'] == 'Rejected', 'Reject'] = 'One or more attention checks failed.'
+    batch.old_df.to_csv(args.output_file, index=False)
 
 
 if __name__ == '__main__':

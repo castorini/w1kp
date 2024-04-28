@@ -1,10 +1,11 @@
-__all__ = ['PromptDataset', 'LPIPSDataset', 'LPIPSCollator']
+__all__ = ['PromptDataset', 'LPIPSDataset', 'LPIPSCollator', 'StratifiedIDSampler']
 
 import random
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Dict
 
+import pandas as pd
 import torch
 from datasets import load_dataset
 import numpy as np
@@ -76,14 +77,14 @@ class LPIPSCollator:
 
         if self.training:
             # Randomly add equal amounts of noise to the images
-            if random.random() < 0.5:
+            if random.random() < -0.5:  # disabled
                 noise = torch.randn_like(inputs1['pixel_values']) * 0.01
                 inputs1['pixel_values'] += noise
                 inputs2['pixel_values'] += noise
                 ref_inputs['pixel_values'] += noise
 
-            # Randomly flip all the images horizontally
-            if random.random() < 0.5:
+            # Randomly flip all the images
+            if random.random() < -0.5:  # disabled
                 inputs1['pixel_values'] = torch.flip(inputs1['pixel_values'], dims=[3])
                 inputs2['pixel_values'] = torch.flip(inputs2['pixel_values'], dims=[3])
                 ref_inputs['pixel_values'] = torch.flip(ref_inputs['pixel_values'], dims=[3])
@@ -97,6 +98,26 @@ class LPIPSCollator:
         )
 
 
+class StratifiedIDSampler(tud.BatchSampler):
+    def __init__(self, dataset: 'LPIPSDataset', macro_size: int = 3):
+        self.dataset = dataset
+        self.id_df = pd.DataFrame({'id': dataset.ids, 'model': dataset.models})
+        self.id_groups = [group.reset_index()['index'].tolist() for _, group in self.id_df.groupby(['model', 'id'])]
+        self.macro_size = macro_size
+
+    def __iter__(self):
+        available_ids = set(range(len(self.id_groups)))
+
+        while available_ids:
+            id_sample = random.sample(available_ids, min(self.macro_size, len(available_ids)))
+            available_ids -= set(id_sample)
+
+            yield [x for i in id_sample for x in self.id_groups[i]]
+
+    def __len__(self):
+        return len(self.id_groups) // self.macro_size
+
+
 class LPIPSDataset(tud.Dataset):
     def __init__(
             self,
@@ -105,12 +126,16 @@ class LPIPSDataset(tud.Dataset):
             ref_images: List[Path],
             judgements: List[float],
             prompts: List[str] = None,
+            ids: List[str] = None,
+            models: List[str] = None,
     ):
         self.images1 = images1
         self.images2 = images2
         self.ref_images = ref_images
         self.judgements = judgements
         self.prompts = prompts
+        self.ids = ids
+        self.models = models
 
     def split(self, train_pct: int) -> Tuple['LPIPSDataset', 'LPIPSDataset']:
         old_state = random.getstate()
@@ -128,6 +153,12 @@ class LPIPSDataset(tud.Dataset):
 
             if self.prompts:
                 data['prompts'].append(self.prompts[i])
+
+            if self.ids:
+                data['ids'].append(self.ids[i])
+
+            if self.models:
+                data['models'].append(self.models[i])
 
         random.setstate(old_state)
 
@@ -158,6 +189,12 @@ class LPIPSDataset(tud.Dataset):
         if self.prompts is not None and other.prompts is not None:
             self.prompts.extend(other.prompts)
 
+        if self.ids is not None and other.ids is not None:
+            self.ids.extend(other.ids)
+
+        if self.models is not None and other.models is not None:
+            self.models.extend(other.models)
+
         return self
 
     def __add__(self, other: 'LPIPSDataset') -> 'LPIPSDataset':
@@ -166,18 +203,22 @@ class LPIPSDataset(tud.Dataset):
             self.images2 + other.images2,
             self.ref_images + other.ref_images,
             self.judgements + other.judgements,
-            self.prompts + other.prompts if self.prompts is not None and other.prompts is not None else None
+            self.prompts + other.prompts if self.prompts is not None and other.prompts is not None else None,
+            self.ids + other.ids if self.ids is not None and other.ids is not None else None,
+            self.models + other.models if self.models is not None and other.models is not None else None
         )
 
     @classmethod
     def from_experiments(cls, experiments: List[Comparison2AFCExperiment]):
         images1 = [exp.get_gen_path(exp.seed1, 'image.png') for exp in experiments]
-        images2 = [exp.get_gen_path(exp.seed2, 'image.png') for exp in experiments]
+        images2 = [exp.get_gen_path(exp.seed2, 'image.png', is_id2=True) for exp in experiments]
         ref_images = [exp.get_gen_path(exp.ref_seed, 'image.png') for exp in experiments]
         judgements = [exp.judgement for exp in experiments]
         prompts = [exp.load_prompt() for exp in experiments]
+        ids = [exp.id for exp in experiments]
+        models = [exp.model_name for exp in experiments]
 
-        return cls(images1, images2, ref_images, judgements, prompts)
+        return cls(images1, images2, ref_images, judgements, prompts, ids, models)
 
     @classmethod
     def from_folder(cls, path: str, resize: int = 64) -> 'LPIPSDataset':

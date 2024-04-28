@@ -11,6 +11,7 @@ from DISTS_pytorch import DISTS
 from PIL.Image import Image
 from stlpips_pytorch import stlpips
 from torch import nn
+from torch.nn.functional import binary_cross_entropy_with_logits as bce_loss
 from transformers import CLIPModel, CLIPProcessor, ViTImageProcessor, ViTModel, AutoImageProcessor, AutoModel, \
     Dinov2Model
 
@@ -75,6 +76,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         self.device = 'cpu'
         self.loss_type = 'bce'
         self.rank_module = stlpips.BCERankingLoss()
+        self.coper_w = nn.Parameter(torch.ones(self.vision_hidden_size), requires_grad=False)
 
         if torch.cuda.is_available():
             torch.set_float32_matmul_precision('high')
@@ -82,24 +84,39 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
             self.device = 'cuda'
 
             if use_dynamo:
-                self.model: nn.Module  = torch.compile(self.model)
+                self.model: nn.Module = torch.compile(self.model)
+
+    @property
+    def vision_num_layers(self) -> int:
+        return 1
+
+    @property
+    def vision_hidden_size(self) -> int:
+        return 384
 
     def set_loss_type(self, loss_type: str):
         self.loss_type = loss_type
 
-        if loss_type == 'bce-rank':
+        if loss_type == 'bce-rank' or loss_type == 'bce-rank-coper':
             for n, p in self.rank_module.named_parameters():
                 p.requires_grad = True
 
-    def compute_loss(self, encoded_scores: torch.Tensor, ground_truths: torch.Tensor) -> torch.Tensor:
-        if self.loss_type == 'bce':
-            return torch.nn.functional.binary_cross_entropy_with_logits(encoded_scores, ground_truths.round())
-        elif self.loss_type == 'bce-rank':
-            encoded_scores = (encoded_scores[0].unsqueeze(1).unsqueeze(1).unsqueeze(1),
-                              encoded_scores[1].unsqueeze(1).unsqueeze(1).unsqueeze(1))
-            ground_truths = ground_truths.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+        if loss_type == 'bce-rank-coper':
+            self.coper_w.requires_grad = True
 
-            return self.rank_module(*encoded_scores, 2 * ground_truths - 1)
+            for name, param in self.model.named_parameters():
+                param.requires_grad = False
+
+    def compute_loss(self, encoded_scores: torch.Tensor | Tuple[torch.Tensor], ground_truths: torch.Tensor) -> torch.Tensor:
+        match self.loss_type:
+            case 'bce':
+                return bce_loss(encoded_scores, ground_truths.round())
+            case 'bce-rank' | 'bce-rank-coper':
+                encoded_scores = (encoded_scores[0].unsqueeze(1).unsqueeze(1).unsqueeze(1),
+                                  encoded_scores[1].unsqueeze(1).unsqueeze(1).unsqueeze(1))
+                ground_truths = ground_truths.unsqueeze(1).unsqueeze(1).unsqueeze(1)
+
+                return self.rank_module(*encoded_scores, 2 * ground_truths - 1)
 
     def forward(
             self,
@@ -116,13 +133,38 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         with torch.no_grad():
             inputs = self.processor(images=[image1, image2], return_tensors='pt')
             inputs['pixel_values'] = inputs['pixel_values'].to(self.device)
-            outputs = self.model(**inputs, return_dict=True)
+            outputs = self.model(**inputs, return_dict=True, output_hidden_states=True)
 
-            return 1 - torch.nn.functional.cosine_similarity(
-                outputs.pooler_output[0],
-                outputs.pooler_output[1],
-                dim=-1
-            ).mean().item()
+            if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
+                return 1 - torch.nn.functional.cosine_similarity(
+                    outputs.pooler_output[0],
+                    outputs.pooler_output[1],
+                    dim=-1
+                ).clamp(-0.1, 1).mean().item()
+            else:
+                diffs = []
+
+                for outputs in outputs['hidden_states']:
+                    hid1 = outputs[0].unsqueeze(0)
+                    hid2 = outputs[1].unsqueeze(0)
+                    l, c = hid1.size(1) - 1, hid1.size(2)
+                    l = int(l ** 0.5)
+                    h1 = hid1[:, 1:].view(hid1.size(0), l, l, c)
+                    h2 = hid2[:, 1:].view(hid2.size(0), l, l, c)
+
+                    # Unit normalize channel-wise
+                    h1 = h1 / (h1.abs().max(dim=-1, keepdim=True)[0] + 1e-6)
+                    h2 = h2 / (h2.abs().max(dim=-1, keepdim=True)[0] + 1e-6)
+
+                    h1 = h1 * self.coper_w.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                    h2 = h2 * self.coper_w.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+                    # Subtract
+                    diff = (h1 - h2).norm(p=2, dim=-1)
+                    diff = diff.mean(-1).mean(-1)
+                    diffs.append(diff)
+
+                return torch.stack(diffs, 0).mean().item()
 
     def encode_scores(
             self,
@@ -135,12 +177,48 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         outputs2 = self.model(pixel_values=image_tensor2, return_dict=True, output_hidden_states=True)
         outputs_ref = self.model(pixel_values=ref_tensor, return_dict=True, output_hidden_states=True)
 
-        features1 = outputs1['pooler_output']
-        features2 = outputs2['pooler_output']
-        features_ref = outputs_ref['pooler_output']
+        if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
+            features1 = outputs1['pooler_output']
+            features2 = outputs2['pooler_output']
+            features_ref = outputs_ref['pooler_output']
 
-        scores1 = torch.cosine_similarity(features1, features_ref, dim=-1)
-        scores2 = torch.cosine_similarity(features2, features_ref, dim=-1)
+            scores1 = torch.cosine_similarity(features1, features_ref, dim=-1).clamp(-0.1, 1)
+            scores2 = torch.cosine_similarity(features2, features_ref, dim=-1).clamp(-0.1, 1)
+        else:  # CoPer
+            diffs1 = []
+            diffs2 = []
+
+            for hid1, hid2, hid_ref in zip(
+                    outputs1['hidden_states'],
+                    outputs2['hidden_states'],
+                    outputs_ref['hidden_states']
+            ):
+                l, c = hid1.size(1) - 1, hid1.size(2)
+                l = int(l ** 0.5)
+                h1 = hid1[:, 1:].view(hid1.size(0), l, l, c)
+                h2 = hid2[:, 1:].view(hid2.size(0), l, l, c)
+                h_ref = hid_ref[:, 1:].view(hid_ref.size(0), l, l, c)
+
+                # Unit normalize channel-wise
+                h1 = h1 / (h1.abs().max(dim=-1, keepdim=True)[0] + 1e-6)
+                h2 = h2 / (h2.abs().max(dim=-1, keepdim=True)[0] + 1e-6)
+                h_ref = h_ref / (h_ref.abs().max(dim=-1, keepdim=True)[0] + 1e-6)
+
+                h1 = h1 * self.coper_w.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                h2 = h2 * self.coper_w.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+                h_ref = h_ref * self.coper_w.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+
+                # Subtract
+                diff1 = (h1 - h_ref).norm(p=2, dim=-1)
+                diff1 = diff1.mean(-1).mean(-1)
+                diffs1.append(diff1)
+
+                diff2 = (h2 - h_ref).norm(p=2, dim=-1)
+                diff2 = diff2.mean(-1).mean(-1)
+                diffs2.append(diff2)
+
+            scores1 = torch.stack(diffs1, 0).mean(0)
+            scores2 = torch.stack(diffs2, 0).mean(0)
 
         if self.loss_type == 'bce':
             return self.a * (scores1 - scores2) + self.b
@@ -153,7 +231,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
 class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
     def __init__(self, model: str = 'facebook/dinov2-small'):
-        # On Midjourney, DinoV2-small does best with one epoch of training (77.86 last two layers)
+        # In pilot experiments, DinoV2-small does best with one epoch of training (77.86 last two layers)
         super().__init__(
             Dinov2Model.from_pretrained(model),
             AutoImageProcessor.from_pretrained(model),
@@ -162,7 +240,6 @@ class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
 
         trainable_names = {
             f'encoder.layer.{len(self.model.encoder.layer) - 1}.',
-            f'encoder.layer.{len(self.model.encoder.layer) - 2}.',
             'layernorm',
         }
 
@@ -174,6 +251,14 @@ class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
 
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+    @property
+    def vision_num_layers(self) -> int:
+        return len(self.model.encoder.layer)
+
+    @property
+    def vision_hidden_size(self) -> int:
+        return self.model.config.hidden_size
 
 
 class ViTDistanceMeasure(TrainablePairwiseMeasure):
@@ -200,6 +285,14 @@ class ViTDistanceMeasure(TrainablePairwiseMeasure):
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
+    @property
+    def vision_num_layers(self) -> int:
+        return len(self.model.encoder.layer)
+
+    @property
+    def vision_hidden_size(self) -> int:
+        return self.model.config.hidden_size
+
 
 class CLIPDistanceMeasure(TrainablePairwiseMeasure):
     def __init__(self, model: str = 'openai/clip-vit-base-patch32'):
@@ -219,6 +312,14 @@ class CLIPDistanceMeasure(TrainablePairwiseMeasure):
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.eval()
+
+    @property
+    def vision_num_layers(self) -> int:
+        return len(self.model.vision_model.encoder.layers)
+
+    @property
+    def vision_hidden_size(self) -> int:
+        return self.model.vision_model.config.hidden_size
 
     def encode_scores(
             self,
@@ -316,6 +417,29 @@ class DISTSProcessor:
 class DISTSDistanceMeasure(TrainablePairwiseMeasure):
     def __init__(self, weights_path: str):
         super().__init__(DISTS(weights_path), DISTSProcessor())
+        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
+
+        for name, param in self.model.named_parameters():
+            param.requires_grad = False
+
+        self.model.alpha.requires_grad = True
+        self.model.beta.requires_grad = True
+
+    def encode_scores(
+            self,
+            prompt: str,
+            image_tensor1: torch.Tensor,
+            image_tensor2: torch.Tensor,
+            ref_tensor: torch.Tensor,
+    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
+        s1 = self.model(image_tensor2, ref_tensor).squeeze()
+        s2 = self.model(image_tensor1, ref_tensor).squeeze()
+
+        if self.loss_type == 'bce':
+            return self.a * (s1 - s2) + self.b
+        else:
+            return s1, s2
 
     def measure(self, prompt: str, image1: Image, image2: Image) -> float:
         with torch.no_grad():

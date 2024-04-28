@@ -10,7 +10,7 @@ import torch.utils.data as tud
 from tqdm import tqdm, trange
 
 from w1kp import GenerationExperiment, LPIPSDistanceMeasure, HitBatch, CLIPDistanceMeasure, ViTDistanceMeasure, \
-    DinoV2DistanceMeasure, LPIPSCollator
+    DinoV2DistanceMeasure, LPIPSCollator, StratifiedIDSampler
 from w1kp.model.distance import DISTSDistanceMeasure
 
 
@@ -19,19 +19,22 @@ async def amain():
                'stlpips-alex', 'stlpips-vgg']
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input-file', '-i', type=str, required=True)
+    parser.add_argument('--input-files', '-i', type=str, nargs='+', required=True)
     parser.add_argument('--input-image-folder', '-iif', type=str, required=True)
     parser.add_argument('--train-pct', '-l', type=int, default=90)
     parser.add_argument('--method', type=str, choices=choices, default='clip')
     parser.add_argument('--batch-size', '-bsz', type=int, default=16)
     parser.add_argument('--lr', '-lr', type=float, default=3e-5)
-    parser.add_argument('--num-epochs', '-ne', type=int, default=5)
+    parser.add_argument('--num-epochs', '-ne', type=int, default=1)
     parser.add_argument('--eval-only', '-eo', action='store_true')
     parser.add_argument('--weights-path', type=str)
-    parser.add_argument('--loss-type', type=str, choices=['bce', 'bce-rank'], default='bce')
+    parser.add_argument('--loss-type', type=str, choices=['bce', 'bce-rank', 'bce-rank-coper'], default='bce')
+    parser.add_argument('--negative-sampling-pct', type=int, default=0)
+    parser.add_argument('--sampler', type=str, default='stratified', choices=['stratified', 'default'])
+    parser.add_argument('--no-low-confidence', action='store_false', dest='low_confidence')
     args = parser.parse_args()
 
-    batch = HitBatch.from_csv(args.input_file, approved_only=True, remove_attention_checks=True)
+    batch = HitBatch.from_csv(*args.input_files, approved_only=True, remove_attention_checks=True)
 
     match args.method:
         case 'lpips-alex':
@@ -55,19 +58,29 @@ async def amain():
         case _:
             measure = None
 
-    measure.set_loss_type(args.loss_type)
+    if measure is not None:
+        measure.set_loss_type(args.loss_type)
+
     train_batch, test_batch = batch.split(args.train_pct)
 
     if not args.eval_only and not args.num_epochs == 0:
-        train_ds = train_batch.to_lpips_dataset(args.input_image_folder)
+        train_ds = train_batch.to_lpips_dataset(
+            args.input_image_folder,
+            negative_sampling_pct=args.negative_sampling_pct,
+            include_low_confidence=args.low_confidence
+        )
         collator = LPIPSCollator(measure.processor)
         collator.train()
 
         if 'lpips' in args.method:
             measure.train()
 
-        optimizer = torch.optim.Adam(measure.get_trainable_parameters(), lr=args.lr)
-        train_dl = tud.DataLoader(train_ds, batch_size=args.batch_size, collate_fn=collator, num_workers=16, shuffle=True)
+        optimizer = torch.optim.AdamW(measure.get_trainable_parameters(), lr=args.lr)
+
+        if args.sampler == 'default':
+            train_dl = tud.DataLoader(train_ds, collate_fn=collator, num_workers=16, batch_size=args.batch_size, shuffle=True)
+        else:
+            train_dl = tud.DataLoader(train_ds, collate_fn=collator, num_workers=16, batch_sampler=StratifiedIDSampler(train_ds))
 
         measure.cuda()
 
@@ -101,6 +114,8 @@ async def amain():
         s1, s2, ref = exp.load_exp_images()
 
         choices = [hit.choice for hit in hits]
+
+        tqdm.write(str(choices))
         a_pct = choices.count('a') / len(choices)
 
         if args.method == 'oracle':
