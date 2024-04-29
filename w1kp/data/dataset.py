@@ -11,6 +11,7 @@ from datasets import load_dataset
 import numpy as np
 from PIL import Image
 import torch.utils.data as tud
+from transformers import AutoTokenizer, CLIPTokenizer
 
 from .experiment import Comparison2AFCExperiment
 from ..utils import cached_load_image
@@ -53,9 +54,10 @@ class PromptDataset(tud.Dataset):
 
 
 class LPIPSCollator:
-    def __init__(self, processor):
+    def __init__(self, processor, tokenizer: CLIPTokenizer = None):
         self.processor = processor
         self.training = False
+        self.tokenizer = tokenizer
 
     def train(self):
         self.training = True
@@ -74,6 +76,9 @@ class LPIPSCollator:
         inputs2 = self.processor(images=images2, return_tensors='pt')
         ref_inputs = self.processor(images=ref_images, return_tensors='pt')
         judgements = torch.Tensor(judgement)
+
+        if self.tokenizer:
+            prompts = self.tokenizer(prompts, return_tensors='pt', padding=True, truncation=True)
 
         if self.training:
             # Randomly add equal amounts of noise to the images

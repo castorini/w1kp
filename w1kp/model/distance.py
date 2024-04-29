@@ -1,5 +1,5 @@
 __all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure',
-           'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure']
+           'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure', 'GroupViTDistanceMeasure']
 
 import itertools
 from typing import List, Dict, Tuple
@@ -12,8 +12,8 @@ from PIL.Image import Image
 from stlpips_pytorch import stlpips
 from torch import nn
 from torch.nn.functional import binary_cross_entropy_with_logits as bce_loss
-from transformers import CLIPModel, CLIPProcessor, ViTImageProcessor, ViTModel, AutoImageProcessor, AutoModel, \
-    Dinov2Model
+from transformers import CLIPModel, CLIPProcessor, ViTImageProcessor, ViTModel, AutoImageProcessor, \
+    Dinov2Model, AutoTokenizer, CLIPTokenizer, GroupViTModel, AutoProcessor
 
 
 class ListwiseDistanceMeasure:
@@ -37,7 +37,7 @@ class PairsListwiseDistanceMeasure(ListwiseDistanceMeasure):
             combs = combs[np.random.choice(np.arange(len(combs)), num_sample, replace=False)]
 
         for i, j in combs:
-            d = self.pairwise_measure(prompt, images[i], images[j])
+            d = self.pairwise_measure.measure(prompt, images[i], images[j])
             total_distance += d
 
             if debug:
@@ -68,7 +68,10 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
             self,
             model: nn.Module,
             processor: AutoImageProcessor,
-            use_dynamo: bool = True
+            use_dynamo: bool = True,
+            tokenizer: AutoTokenizer = None,
+            use_text: bool = False,
+            distance_type: str = 'cosine',
     ):
         super().__init__()
         self.model = model
@@ -77,6 +80,9 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         self.loss_type = 'bce'
         self.rank_module = stlpips.BCERankingLoss()
         self.coper_w = nn.Parameter(torch.ones(self.vision_hidden_size), requires_grad=False)
+        self.tokenizer = tokenizer
+        self.use_text = use_text
+        self.distance_type = distance_type
 
         if torch.cuda.is_available():
             torch.set_float32_matmul_precision('high')
@@ -85,6 +91,12 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
             if use_dynamo:
                 self.model: nn.Module = torch.compile(self.model)
+
+    def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
+        raise NotImplementedError
+
+    def get_text_features(self, **prompt):
+        raise NotImplementedError
 
     @property
     def vision_num_layers(self) -> int:
@@ -120,7 +132,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
     def forward(
             self,
-            prompt: str = None,
+            prompt: torch.Tensor = None,
             image1: torch.Tensor = None,
             image2: torch.Tensor = None,
             ref_image: torch.Tensor = None,
@@ -129,18 +141,37 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         encoded_scores = self.encode_scores(prompt, image1, image2, ref_image)
         return self.compute_loss(encoded_scores, ground_truths)
 
+    def distance_function(self, x, y, dim: int = -1):
+        match self.distance_type:
+            case 'cosine':
+                return 1 - torch.nn.functional.cosine_similarity(x, y, dim=dim).clamp(-0.1, 1)
+            case 'dot':
+                return (-(x * y).sum(dim=dim)).clamp(max=0.1)
+            case 'l2':
+                return (x - y).norm(p=2, dim=dim)
+
     def measure(self, prompt: str, image1: Image, image2: Image) -> float:
         with torch.no_grad():
             inputs = self.processor(images=[image1, image2], return_tensors='pt')
-            inputs['pixel_values'] = inputs['pixel_values'].to(self.device)
-            outputs = self.model(**inputs, return_dict=True, output_hidden_states=True)
+            inputs = {k: v.to(self.device) for k, v in inputs.items() if isinstance(v, torch.Tensor)}
+
+            outputs = self.get_image_features(pixel_values=inputs['pixel_values'], return_dict=True)
+            features1, features2 = outputs['features'][0], outputs['features'][1]
+
+            if self.use_text and self.tokenizer:
+                prompt = self.tokenizer([prompt], return_tensors='pt', padding=True, truncation=True)
+                prompt = {k: v.to(self.device) for k, v in prompt.items()}
+                text_features = self.get_text_features(**prompt)
+
+                min_length = min(text_features.size(1), features1.size(0))
+                features1 = features1[:min_length]
+                features2 = features2[:min_length]
+                text_features = text_features[:, min_length]
+                features1 += text_features.squeeze()
+                features2 += text_features.squeeze()
 
             if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
-                return 1 - torch.nn.functional.cosine_similarity(
-                    outputs.pooler_output[0],
-                    outputs.pooler_output[1],
-                    dim=-1
-                ).clamp(-0.1, 1).mean().item()
+                return self.distance_function(features1, features2).item()
             else:
                 diffs = []
 
@@ -168,22 +199,35 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
     def encode_scores(
             self,
-            prompt: str,
+            prompt: Dict[str, torch.Tensor],
             image_tensor1: torch.Tensor,
             image_tensor2: torch.Tensor,
             ref_tensor: torch.Tensor,
     ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
-        outputs1 = self.model(pixel_values=image_tensor1, return_dict=True, output_hidden_states=True)
-        outputs2 = self.model(pixel_values=image_tensor2, return_dict=True, output_hidden_states=True)
-        outputs_ref = self.model(pixel_values=ref_tensor, return_dict=True, output_hidden_states=True)
+        outputs1 = self.get_image_features(image_tensor1)
+        outputs2 = self.get_image_features(image_tensor2)
+        outputs_ref = self.get_image_features(ref_tensor)
 
         if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
-            features1 = outputs1['pooler_output']
-            features2 = outputs2['pooler_output']
-            features_ref = outputs_ref['pooler_output']
+            features1 = outputs1['features']
+            features2 = outputs2['features']
+            features_ref = outputs_ref['features']
 
-            scores1 = torch.cosine_similarity(features1, features_ref, dim=-1).clamp(-0.1, 1)
-            scores2 = torch.cosine_similarity(features2, features_ref, dim=-1).clamp(-0.1, 1)
+            if self.use_text and self.tokenizer:
+                text_features = self.get_text_features(**prompt)
+
+                min_length = min(text_features.size(1), features1.size(1))
+                features1 = features1[:, :min_length]
+                features2 = features2[:, :min_length]
+                features_ref = features_ref[:, :min_length]
+                text_features = text_features[:, :min_length]
+
+                features1 += text_features
+                features2 += text_features
+                features_ref += text_features
+
+            scores1 = -self.distance_function(features1, features_ref, dim=-1)
+            scores2 = -self.distance_function(features2, features_ref, dim=-1)
         else:  # CoPer
             diffs1 = []
             diffs2 = []
@@ -230,12 +274,13 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
 
 class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
-    def __init__(self, model: str = 'facebook/dinov2-small'):
+    def __init__(self, model: str = 'facebook/dinov2-small', **kwargs):
         # In pilot experiments, DinoV2-small does best with one epoch of training (77.86 last two layers)
         super().__init__(
             Dinov2Model.from_pretrained(model),
             AutoImageProcessor.from_pretrained(model),
             use_dynamo=False,
+            **kwargs
         )
 
         trainable_names = {
@@ -252,6 +297,10 @@ class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
+    def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
+        ret = self.model(pixel_values=pixel_values, return_dict=True, output_hidden_states=True)
+        return dict(features=ret['pooler_output'], hidden_states=ret['hidden_states'])
+
     @property
     def vision_num_layers(self) -> int:
         return len(self.model.encoder.layer)
@@ -262,11 +311,12 @@ class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
 
 
 class ViTDistanceMeasure(TrainablePairwiseMeasure):
-    def __init__(self, model: str = 'google/vit-base-patch32-224-in21k'):
+    def __init__(self, model: str = 'google/vit-base-patch32-224-in21k', **kwargs):
         super().__init__(
             ViTModel.from_pretrained(model),
             ViTImageProcessor.from_pretrained(model),
             use_dynamo=False,
+            **kwargs
         )
         num_layers = len(self.model.encoder.layer)
 
@@ -285,6 +335,10 @@ class ViTDistanceMeasure(TrainablePairwiseMeasure):
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
+    def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
+        ret = self.model(pixel_values=pixel_values, return_dict=True, output_hidden_states=True)
+        return dict(features=ret['pooler_output'], hidden_states=ret['hidden_states'])
+
     @property
     def vision_num_layers(self) -> int:
         return len(self.model.encoder.layer)
@@ -295,12 +349,29 @@ class ViTDistanceMeasure(TrainablePairwiseMeasure):
 
 
 class CLIPDistanceMeasure(TrainablePairwiseMeasure):
-    def __init__(self, model: str = 'openai/clip-vit-base-patch32'):
-        super().__init__(CLIPModel.from_pretrained(model), CLIPProcessor.from_pretrained(model))
+    def __init__(
+            self,
+            model: str = 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
+            default_featurizer: bool = False,
+            use_text: bool = False,
+            **kwargs
+    ):
+        super().__init__(
+            CLIPModel.from_pretrained(model),
+            CLIPProcessor.from_pretrained(model),
+            tokenizer=CLIPTokenizer.from_pretrained(model),
+            use_text=use_text,
+            **kwargs
+        )
+
         num_layers = len(self.model.vision_model.encoder.layers)
         trainable_names = {
             'post_layernorm',
             f'vision_model.encoder.layers.{num_layers - 1}.',
+            f'text_model.encoder.layers.{num_layers - 1}.',
+            'final_layer_norm',
+            'visual_projection',
+            'text_projection',
         }
 
         for name, param in self.model.named_parameters():
@@ -312,6 +383,7 @@ class CLIPDistanceMeasure(TrainablePairwiseMeasure):
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.eval()
+        self.default_featurizer = default_featurizer
 
     @property
     def vision_num_layers(self) -> int:
@@ -321,67 +393,100 @@ class CLIPDistanceMeasure(TrainablePairwiseMeasure):
     def vision_hidden_size(self) -> int:
         return self.model.vision_model.config.hidden_size
 
-    def encode_scores(
-            self,
-            prompt: str,
-            image_tensor1: torch.Tensor,
-            image_tensor2: torch.Tensor,
-            ref_tensor: torch.Tensor,
-    ) -> torch.Tensor | Tuple[torch.Tensor, torch.Tensor]:
-        vision_outputs1 = self.model.vision_model(
-            pixel_values=image_tensor1,
-            output_attentions=None,
-            output_hidden_states=False,
-            return_dict=True,
-        )
+    def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
+        if self.default_featurizer:
+            out = self.model.get_image_features(pixel_values=pixel_values, output_hidden_states=True, return_dict=True)
 
-        vision_outputs2 = self.model.vision_model(
-            pixel_values=image_tensor2,
-            output_attentions=None,
-            output_hidden_states=False,
-            return_dict=True,
-        )
-
-        vision_outputs_ref = self.model.vision_model(
-            pixel_values=ref_tensor,
-            output_attentions=None,
-            output_hidden_states=False,
-            return_dict=True,
-        )
-
-        features1 = vision_outputs1['pooler_output']
-        features2 = vision_outputs2['pooler_output']
-        features_ref = vision_outputs_ref['pooler_output']
-
-        scores1 = torch.cosine_similarity(features1, features_ref, dim=-1)
-        scores2 = torch.cosine_similarity(features2, features_ref, dim=-1)
-
-        if self.loss_type == 'bce':
-            return self.a * (scores1 - scores2) + self.b
+            return dict(features=out)
         else:
-            return scores1, scores2
+            ret = self.model.vision_model(
+                pixel_values=pixel_values,
+                output_attentions=None,
+                output_hidden_states=True,
+                return_dict=True,
+            )  # this yields slightly better quality
+            out = ret['pooler_output']
 
-    def get_vision_features(self, pixel_values: torch.FloatTensor | None = None):
-        vision_outputs = self.model.vision_model(
-            pixel_values=pixel_values,
-            output_attentions=None,
-            output_hidden_states=True,
-            return_dict=True,
+            return dict(features=out, hidden_states=ret['hidden_states'])
+
+    def get_text_features(self, **prompt):
+        if self.default_featurizer:
+            return self.model.get_text_features(**prompt)
+        else:
+            text_outputs = self.model.text_model(**prompt)
+            pooled_output = text_outputs[1]
+
+            return pooled_output
+
+
+class GroupViTDistanceMeasure(TrainablePairwiseMeasure):
+    def __init__(
+            self,
+            model: str = 'nvidia/groupvit-gcc-yfcc',
+            default_featurizer: bool = False,
+            use_text: bool = False,
+            **kwargs
+    ):
+        super().__init__(
+            GroupViTModel.from_pretrained(model),
+            AutoProcessor.from_pretrained(model),
+            tokenizer=CLIPTokenizer.from_pretrained(model),
+            use_text=use_text,
+            **kwargs
         )
 
-        return vision_outputs['pooler_output']
+        trainable_names = {
+            'vision_model.layernorm',
+            f'vision_model.encoder.stages.2.layers.2.',
+            f'text_model.encoder.layers.11.',
+            'final_layer_norm',
+            'visual_projection',
+            'text_projection',
+        }
 
-    def measure(self, prompt: str, image1: Image, image2: Image) -> float:
-        with torch.no_grad():
-            inputs = self.processor(text=[prompt], images=[image1, image2], return_tensors='pt', padding=True)
-            inputs['pixel_values'] = inputs['pixel_values'].to(self.device)
-            inputs['input_ids'] = inputs['input_ids'].to(self.device)
-            inputs['attention_mask'] = inputs['attention_mask'].to(self.device)
+        for name, param in self.model.named_parameters():
+            if any(substr in name for substr in trainable_names):
+                continue
 
-            outputs = self.get_vision_features(pixel_values=inputs['pixel_values'])
-            features = torch.nn.functional.cosine_similarity(outputs[0], outputs[1], dim=-1)
+            param.requires_grad = False
 
-            return 1 - features.item()
+        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
+        self.eval()
+        self.default_featurizer = default_featurizer
+
+    @property
+    def vision_num_layers(self) -> int:
+        return 2
+
+    @property
+    def vision_hidden_size(self) -> int:
+        return self.model.vision_model.config.hidden_size
+
+    def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
+        if self.default_featurizer:
+            out = self.model.get_image_features(pixel_values=pixel_values, output_hidden_states=True, return_dict=True)
+
+            return dict(features=out)
+        else:
+            ret = self.model.vision_model(
+                pixel_values=pixel_values,
+                output_attentions=None,
+                output_hidden_states=True,
+                return_dict=True,
+            )  # this yields slightly better quality
+            out = ret['pooler_output']
+
+            return dict(features=out, hidden_states=ret['hidden_states'])
+
+    def get_text_features(self, **prompt):
+        if self.default_featurizer:
+            return self.model.get_text_features(**prompt)
+        else:
+            text_outputs = self.model.text_model(**prompt)
+            pooled_output = text_outputs[1]
+
+            return pooled_output
 
 
 class LPIPSProcessor:
@@ -415,8 +520,8 @@ class DISTSProcessor:
 
 
 class DISTSDistanceMeasure(TrainablePairwiseMeasure):
-    def __init__(self, weights_path: str):
-        super().__init__(DISTS(weights_path), DISTSProcessor())
+    def __init__(self, weights_path: str, **kwargs):
+        super().__init__(DISTS(weights_path), DISTSProcessor(), **kwargs)
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
@@ -428,7 +533,7 @@ class DISTSDistanceMeasure(TrainablePairwiseMeasure):
 
     def encode_scores(
             self,
-            prompt: str,
+            prompt: Dict[str, torch.Tensor],
             image_tensor1: torch.Tensor,
             image_tensor2: torch.Tensor,
             ref_tensor: torch.Tensor,
@@ -452,7 +557,7 @@ class DISTSDistanceMeasure(TrainablePairwiseMeasure):
 
 
 class LPIPSDistanceMeasure(TrainablePairwiseMeasure):
-    def __init__(self, network: str = 'alex', ft_dnn_only: bool = True, shift_tolerant: bool = False):
+    def __init__(self, network: str = 'alex', ft_dnn_only: bool = True, shift_tolerant: bool = False, **kwargs):
         if shift_tolerant:
             model = stlpips.LPIPS(net=network, variant='shift_tolerant')
             processor = STLPIPSProcessor()
@@ -460,7 +565,7 @@ class LPIPSDistanceMeasure(TrainablePairwiseMeasure):
             model = lpips.LPIPS(net=network)
             processor = LPIPSProcessor()
 
-        super().__init__(model, processor, use_dynamo=False)
+        super().__init__(model, processor, use_dynamo=False, **kwargs)
         self.a = nn.Parameter(torch.ones(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
@@ -469,7 +574,7 @@ class LPIPSDistanceMeasure(TrainablePairwiseMeasure):
 
     def encode_scores(
             self,
-            prompt: str,
+            prompt: Dict[str, torch.Tensor],
             image_tensor1: torch.Tensor,
             image_tensor2: torch.Tensor,
             ref_tensor: torch.Tensor,

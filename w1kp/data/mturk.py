@@ -138,12 +138,14 @@ class HitBatch:
 
             for _ in range((negative_sampling_pct * len(exps)) // 100):
                 group1, group2 = random.sample(groups, 2)
-                exp1 = random.choice(group1).load_comparison_experiment(image_root_folder)
-                exp2 = random.choice(group2).load_comparison_experiment(image_root_folder)
-                exp1.judgement = 1.0
-                exp1.id2 = exp2.id
-                exp1.seed2 = exp2.seed1
-                exps.append(exp1)
+
+                for exp1 in group1:
+                    exp1 = exp1.load_comparison_experiment(image_root_folder)
+                    exp2 = random.choice(group2).load_comparison_experiment(image_root_folder)
+                    exp1.judgement = 1.0
+                    exp1.id2 = exp2.id
+                    exp1.seed2 = exp2.seed1
+                    exps.append(exp1)
 
         return LPIPSDataset.from_experiments(exps)
 
