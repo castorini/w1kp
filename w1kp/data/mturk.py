@@ -20,8 +20,12 @@ def extract_info_from_url(url: str) -> Dict[str, str]:
 class HitRow:
     patt = re.compile(r'^.*com/(?P<model>.+?)/(?P<id>.+?)/comparison-(?P<seed1>.+?)-(?P<seed2>.+?)-(?P<ref_seed>.+?).jpg$')
 
-    def __init__(self, row: pd.Series):
+    def __init__(self, row: pd.Series, allow_swap: bool = True):
         self.row = row
+        info = self.extract_info_from_url()
+
+        key = hash('-'.join(info.values())) if allow_swap else 1
+        self.do_swap = key % 2 == 0  # swap half of the time to break any potential position bias
 
     def __getitem__(self, item):
         return self.row[item]
@@ -44,15 +48,20 @@ class HitRow:
 
     @property
     def choice(self):
-        return 'a' if 'Image A' in self.row['Answer.category.label'] else 'b'
+        choice = 'a' if 'Image A' in self.row['Answer.category.label'] else 'b'
+
+        if self.do_swap:
+            choice = 'a' if choice == 'b' else 'b'
+
+        return choice
 
     def load_comparison_experiment(self, root_folder: str | Path) -> 'Comparison2AFCExperiment':
         return Comparison2AFCExperiment(
             model_name=self.row['model'],
             id=self.row['id'],
             ref_seed=self.row['ref_seed'],
-            seed1=self.row['seed1'],
-            seed2=self.row['seed2'],
+            seed1=self.row['seed2'] if self.do_swap else self.row['seed1'],
+            seed2=self.row['seed1'] if self.do_swap else self.row['seed2'],
             root_folder=Path(root_folder)
         )
 
@@ -134,10 +143,15 @@ class HitBatch:
             exps.append(exp)
 
         if negative_sampling_pct > 0:
-            groups = list(self.iter_group_by_id())
+            groups = list(self.iter_group_by_id(allow_swap=False))
+            models = [rows[0].model for rows in groups]
+            group_dict = defaultdict(list)
+
+            for rows in groups:
+                group_dict[rows[0].model].append(rows)
 
             for _ in range((negative_sampling_pct * len(exps)) // 100):
-                group1, group2 = random.sample(groups, 2)
+                group1, group2 = random.sample(group_dict[random.choice(models)], 2)
 
                 for exp1 in group1:
                     exp1 = exp1.load_comparison_experiment(image_root_folder)
@@ -159,11 +173,11 @@ class HitBatch:
             limit = (ceil(len(group) / 2) * 2 - 1) if limit_odd else len(group)
             yield [HitRow(row) for _, row in group.iterrows()][:limit]
 
-    def iter_group_by_id(self) -> Generator[List[HitRow], Any, None]:
+    def iter_group_by_id(self, **kwargs) -> Generator[List[HitRow], Any, None]:
         df = self.df.groupby(['model', 'id'])
 
         for _, group in df:
-            yield [HitRow(row) for _, row in group.iterrows()]
+            yield [HitRow(row, **kwargs) for _, row in group.iterrows()]
 
     def __iter__(self) -> Generator[HitRow, Any, None]:
         return (HitRow(x) for _, x in self.df.iterrows())

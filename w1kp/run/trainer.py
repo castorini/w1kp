@@ -44,6 +44,7 @@ async def amain():
     parser.add_argument('--use-text', action='store_true')
     parser.add_argument('--weight-decay', '-wd', type=float)
     parser.add_argument('--distance-type', '-dt', type=str, default='cosine', choices=['cosine', 'l2', 'dot'])
+    parser.add_argument('--macro-size', type=int, default=3)
     args = parser.parse_args()
 
     opt_kwargs = dict(weight_decay=args.weight_decay) if args.weight_decay is not None else dict()
@@ -99,7 +100,7 @@ async def amain():
         if args.sampler == 'default':
             train_dl = tud.DataLoader(train_ds, collate_fn=collator, num_workers=16, batch_size=args.batch_size, shuffle=True)
         else:
-            train_dl = tud.DataLoader(train_ds, collate_fn=collator, num_workers=16, batch_sampler=StratifiedIDSampler(train_ds))
+            train_dl = tud.DataLoader(train_ds, collate_fn=collator, num_workers=16, batch_sampler=StratifiedIDSampler(train_ds, macro_size=args.macro_size))
 
         match args.lr_scheduler:
             case 'linear':

@@ -52,6 +52,16 @@ class PromptDataset(tud.Dataset):
     def from_diffusiondb(cls, split: str = '2m_random_100k', **kwargs) -> 'PromptDataset':
         return cls.from_dataset('poloclub/diffusiondb', split, 'prompt', **kwargs)
 
+    @classmethod
+    def from_stdin(cls) -> 'PromptDataset':
+        prompts = []
+
+        with open(0) as f:
+            for line in f:
+                prompts.append(line.strip())
+
+        return cls(prompts)
+
 
 class LPIPSCollator:
     def __init__(self, processor, tokenizer: CLIPTokenizer = None):

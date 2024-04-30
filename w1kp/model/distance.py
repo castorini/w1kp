@@ -83,6 +83,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         self.tokenizer = tokenizer
         self.use_text = use_text
         self.distance_type = distance_type
+        self.register_buffer('max_l2_norm', torch.Tensor([1.0]))
 
         if torch.cuda.is_available():
             torch.set_float32_matmul_precision('high')
@@ -144,11 +145,15 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
     def distance_function(self, x, y, dim: int = -1):
         match self.distance_type:
             case 'cosine':
-                return 1 - torch.nn.functional.cosine_similarity(x, y, dim=dim).clamp(-0.1, 1)
+                sim = torch.nn.functional.cosine_similarity(x, y, dim=dim).clamp(-0.1, 1)
+                return 1 - sim
             case 'dot':
-                return (-(x * y).sum(dim=dim)).clamp(max=0.1)
+                return (-(x * y).sum(dim=dim))  # unnormalized, do not use
             case 'l2':
-                return (x - y).norm(p=2, dim=dim)
+                norm = (x - y).norm(p=2, dim=dim)
+                self.max_l2_norm = max(self.max_l2_norm, norm.max().item())
+
+                return norm / self.max_l2_norm  # normalize to [0, 1]
 
     def measure(self, prompt: str, image1: Image, image2: Image) -> float:
         with torch.no_grad():
@@ -171,7 +176,12 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
                 features2 += text_features.squeeze()
 
             if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
-                return self.distance_function(features1, features2).item()
+                dist = self.distance_function(features1, features2).item()
+
+                if self.distance_type == 'cosine':
+                    dist = dist / 1.1  # normalize to [0, 1]
+
+                return dist
             else:
                 diffs = []
 
@@ -265,7 +275,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
             scores2 = torch.stack(diffs2, 0).mean(0)
 
         if self.loss_type == 'bce':
-            return self.a * (scores1 - scores2) + self.b
+            return self.a * (scores1 - scores2)
         else:
             return scores1, scores2
 
@@ -275,7 +285,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
 class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
     def __init__(self, model: str = 'facebook/dinov2-small', **kwargs):
-        # In pilot experiments, DinoV2-small does best with one epoch of training (77.86 last two layers)
+        # In pilot experiments, DinoV2-small does best with two epochs of training and a weight decay of 0.2
         super().__init__(
             Dinov2Model.from_pretrained(model),
             AutoImageProcessor.from_pretrained(model),

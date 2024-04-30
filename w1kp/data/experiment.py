@@ -209,7 +209,7 @@ class Comparison2AFCExperiment(BaseModel):
             self.root_folder = Path(self.root_folder)
 
     def get_gen_path(self, seed: str, filename: str = '.', is_id2: bool = False) -> Path:
-        id = self.id2 if is_id2 and self.id2 else self.id
+        id = self.id2 if (is_id2 and self.id2 is not None) else self.id
         return Path(self.root_folder) / self.model_name / id / seed / filename
 
     def get_comparison_path(self) -> Path:

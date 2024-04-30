@@ -19,9 +19,20 @@ async def amain():
     parser.add_argument('--num-prompts', '-np', type=int, default=100000)
     parser.add_argument('--model', type=str, default='dalle3', choices=models)
     parser.add_argument('--midjourney-api-key', type=str)
+    parser.add_argument('--type', '-t', type=str, default='diffusiondb', choices=['diffusiondb', 'stdin', 'cli'])
+    parser.add_argument('--filter-guidance', '-fg', type=float, default=7.0)
+    parser.add_argument('--prompts', '-p', type=str, nargs='+')
+    parser.add_argument('--regenerate', '-r', action='store_true')
+    parser.add_argument('--skip-num', '-sn', type=int, default=0, help='The number of prompts to skip from the beginning')
     args = parser.parse_args()
 
-    prompt_dataset = PromptDataset.from_diffusiondb(filter_guidance=7.0)
+    match args.type:
+        case 'diffusiondb':
+            prompt_dataset = PromptDataset.from_diffusiondb(filter_guidance=args.filter_guidance)
+        case 'stdin':
+            prompt_dataset = PromptDataset.from_stdin()
+        case 'cli':
+            prompt_dataset = PromptDataset(args.prompts)
 
     match args.model:
         case 'dalle3':
@@ -32,7 +43,7 @@ async def amain():
             image_gens = [StableDiffusion2ImageGenerator()]
         case 'midjourney':
             if args.midjourney_api_key is None:
-                raise ValueError('MidJourney API key required for model midjourney')
+                raise ValueError('MidJourney API key required (--midjourney-api-key) for model midjourney')
 
             image_gens = [ImagineApiMidjourneyGenerator(api_key=args.midjourney_api_key) for _ in range(3)]
         case _:
@@ -41,16 +52,25 @@ async def amain():
     num_images_per_seed = math.ceil(args.num_images_per_seed / image_gens[0].num_multiple)
 
     for ds_idx, (prompt, image) in enumerate(tqdm(prompt_dataset, position=1, desc='Generating images')):
-        if ds_idx >= args.num_prompts:
+        if ds_idx < args.skip_num:
+            continue
+
+        if args.skip_num + ds_idx >= args.num_prompts:
             break
 
         skip = False
 
         for seed in range(num_images_per_seed):
             seed = str(seed)
-            exp = GenerationExperiment(prompt, model_name=args.model, id=str(ds_idx), seed=seed, root_folder=args.output_folder)
+            exp = GenerationExperiment(
+                prompt,
+                model_name=args.model,
+                id=str(ds_idx),
+                seed=seed,
+                root_folder=args.output_folder
+            )
 
-            if exp.get_path('image.png').exists():
+            if exp.get_path('image.png').exists() and not args.regenerate:
                 print(f'Skipping {ds_idx}')
                 skip = True
                 break

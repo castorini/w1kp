@@ -13,7 +13,8 @@ setuptools.setup(
     python_requires='>=3.10',
     entry_points={
         'console_scripts': [
-            'w1kp_generate=w1kp.run:generate'
+            'w1kp_generate_images=w1kp.run.generate_images:main',
+            'w1kp_trainer=w1kp.run.trainer:main',
         ]
     }
 )
