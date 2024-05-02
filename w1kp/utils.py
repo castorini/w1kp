@@ -1,4 +1,4 @@
-__all__ = ['set_seed', 'cached_load_image', 'apply_ema']
+__all__ = ['set_seed', 'load_image', 'apply_ema']
 
 from functools import lru_cache
 import random
@@ -22,8 +22,7 @@ def set_seed(seed: int):
     np.random.seed(seed)
 
 
-@lru_cache(maxsize=4096)
-def cached_load_image(path: str) -> PIL.Image.Image:
+def load_image(path: str) -> PIL.Image.Image:
     with PIL.Image.open(str(path)) as img:
         img.load()
         return img

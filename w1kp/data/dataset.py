@@ -14,7 +14,7 @@ import torch.utils.data as tud
 from transformers import AutoTokenizer, CLIPTokenizer
 
 from .experiment import Comparison2AFCExperiment
-from ..utils import cached_load_image
+from ..utils import load_image
 
 
 class PromptDataset(tud.Dataset):
@@ -98,7 +98,7 @@ class LPIPSCollator:
                 inputs2['pixel_values'] += noise
                 ref_inputs['pixel_values'] += noise
 
-            # Randomly flip all the images
+            # Randomly flip all the images horizontally
             if random.random() < -0.5:  # disabled
                 inputs1['pixel_values'] = torch.flip(inputs1['pixel_values'], dims=[3])
                 inputs2['pixel_values'] = torch.flip(inputs2['pixel_values'], dims=[3])
@@ -187,7 +187,7 @@ class LPIPSDataset(tud.Dataset):
         ims = []
 
         for im in (im1, im2, ref_im):
-            im_ = cached_load_image(str(im))
+            im_ = load_image(str(im))
             ims.append(im_)
 
         return dict(image1=ims[0], image2=ims[1], ref_image=ims[2], judgement=judgement, prompt=prompt)
