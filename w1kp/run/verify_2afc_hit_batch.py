@@ -41,6 +41,7 @@ def main():
                 pass
 
     print(f'Pass percentage: {len(pass_workers_ids) / len(batch.df["WorkerId"].unique()) * 100:.2f}%')
+    print(fail_workers_ids)
 
     # Mark rows appropriately
     for wid in fail_workers_ids:

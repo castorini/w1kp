@@ -13,7 +13,7 @@ from matplotlib import pyplot as plt
 from tqdm.asyncio import tqdm
 import aioboto3
 
-from w1kp import DinoV2DistanceMeasure
+from w1kp import DinoV2DistanceMeasure, LPIPSDistanceMeasure
 
 
 async def amain():
@@ -41,16 +41,21 @@ async def amain():
         return fig, ax
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model-path', type=Path, required=True)
+    parser.add_argument('--model-path', type=Path)
     parser.add_argument('--input-folder', '-i', required=True, type=Path)
     parser.add_argument('--output-path', '-o', type=Path, default='magnitude-outputs')
+    parser.add_argument('--distance-only', '-do', action='store_true')
     parser.add_argument('--model', type=str, default='dalle3', choices=['dalle3', 'sdxl', 'sd2', 'imagen', 'midjourney'])
     parser.add_argument('--attn-prob', type=float, default=0.2)
     parser.add_argument('--limit', type=int, default=300)
+    parser.add_argument('--suffix', type=str, default='')
     args = parser.parse_args()
 
-    measure = DinoV2DistanceMeasure()
-    measure.load_state_dict(torch.load(args.model_path))
+    measure = LPIPSDistanceMeasure(network='vgg')
+
+    if args.model_path:
+        measure.load_state_dict(torch.load(args.model_path))
+
     data_rows = []
     args.output_path.mkdir(exist_ok=True, parents=True)
     num = 0
@@ -72,15 +77,17 @@ async def amain():
         image_b = seeds[1] / 'image.png'
         image_a = PIL.Image.open(image_a)
         image_b = PIL.Image.open(image_b)
-        fig, ax = plot_images(image_a, image_b)
-        plt.savefig(args.output_path / f'{args.model}-{id}-true.jpg', bbox_inches='tight')
-        plt.close(fig)
+
+        if not args.distance_only:
+            fig, ax = plot_images(image_a, image_b)
+            plt.savefig(args.output_path / f'{args.model}-{id}-true.jpg', bbox_inches='tight')
+            plt.close(fig)
 
         distance = measure.measure('unused', image_a, image_b)
         data_rows.append(dict(distance=distance, image_url=f'{args.model}-{id}-true.jpg'))
         print(distance, path)
 
-        if random.random() < args.attn_prob:
+        if random.random() < args.attn_prob and not args.distance_only:
             fig, ax = plot_images(image_b, image_b)
             plt.savefig(args.output_path / f'{args.model}-{id}-fake.jpg', bbox_inches='tight')
             plt.close(fig)
@@ -91,7 +98,7 @@ async def amain():
         image_b.close()
 
     df = pd.DataFrame(data_rows).sample(frac=1.0)
-    df.to_csv(args.output_path / 'magnitude.csv', index=False)
+    df.to_csv(args.output_path / f'magnitude{args.suffix}.csv', index=False)
 
 
 def main():

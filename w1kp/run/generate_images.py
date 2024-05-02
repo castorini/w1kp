@@ -1,12 +1,13 @@
 import argparse
 import asyncio
 import math
+from pathlib import Path
 
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 
 from w1kp import PromptDataset, AzureOpenAIImageGenerator, GenerationExperiment, StableDiffusionXLImageGenerator, \
-    StableDiffusion2ImageGenerator, ImagineApiMidjourneyGenerator
+    StableDiffusion2ImageGenerator, ImagineApiMidjourneyGenerator, GoogleImagenImageGenerator
 
 
 async def amain():
@@ -19,7 +20,9 @@ async def amain():
     parser.add_argument('--num-prompts', '-np', type=int, default=100000)
     parser.add_argument('--model', type=str, default='dalle3', choices=models)
     parser.add_argument('--midjourney-api-key', type=str)
-    parser.add_argument('--type', '-t', type=str, default='diffusiondb', choices=['diffusiondb', 'stdin', 'cli'])
+    parser.add_argument('--imagen-project-id', type=str)
+    parser.add_argument('--type', '-t', type=str, default='diffusiondb', choices=['diffusiondb', 'stdin', 'cli', 'folder'])
+    parser.add_argument('--load-folder', '-lf', type=str)
     parser.add_argument('--filter-guidance', '-fg', type=float, default=7.0)
     parser.add_argument('--prompts', '-p', type=str, nargs='+')
     parser.add_argument('--regenerate', '-r', action='store_true')
@@ -33,6 +36,18 @@ async def amain():
             prompt_dataset = PromptDataset.from_stdin()
         case 'cli':
             prompt_dataset = PromptDataset(args.prompts)
+        case 'folder':
+            folder = args.load_folder if args.load_folder else args.output_folder
+            folder = Path(folder)
+            prompts = []
+
+            for filepath in folder.glob('**/prompt.txt'):
+                prompt = filepath.read_text().strip()
+                prompts.append((int(filepath.parent.parent.name), prompt))
+
+            prompts = [x[1] for x in sorted(prompts, key=lambda x: x[0])]
+            prompts = list(dict.fromkeys(prompts))
+            prompt_dataset = PromptDataset(prompts)
 
     match args.model:
         case 'dalle3':
@@ -46,6 +61,11 @@ async def amain():
                 raise ValueError('MidJourney API key required (--midjourney-api-key) for model midjourney')
 
             image_gens = [ImagineApiMidjourneyGenerator(api_key=args.midjourney_api_key) for _ in range(3)]
+        case 'imagen':
+            if args.imagen_project_id is None:
+                raise ValueError('Imagen project ID required (--imagen-project-id) for model imagen')
+
+            image_gens = [GoogleImagenImageGenerator(project_id=args.imagen_project_id)]
         case _:
             raise ValueError('Model not implemented')
 

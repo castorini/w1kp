@@ -49,8 +49,6 @@ async def amain():
 
     opt_kwargs = dict(weight_decay=args.weight_decay) if args.weight_decay is not None else dict()
     opt_kwargs['lr'] = args.lr
-
-    batch = HitBatch.from_csv(*args.input_files, approved_only=True, remove_attention_checks=True)
     dt = args.distance_type
 
     match args.method:
@@ -80,6 +78,7 @@ async def amain():
     if measure is not None:
         measure.set_loss_type(args.loss_type)
 
+    batch = HitBatch.from_csv(*args.input_files, approved_only=True, remove_attention_checks=True)
     train_batch, test_batch = batch.split(args.train_pct)
 
     if not args.eval_only and not args.num_epochs == 0:

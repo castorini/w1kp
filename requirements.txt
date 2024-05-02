@@ -17,3 +17,4 @@ matplotlib~=3.8.2
 aioboto3~=12.4.0
 stlpips_pytorch~=0.0.2
 torchsummary~=1.5.1
+google-cloud-aiplatform~=1.49.0

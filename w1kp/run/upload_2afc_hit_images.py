@@ -29,6 +29,7 @@ async def amain():
     parser.add_argument('--url', '-u', type=str, default='https://{bucket}.s3.amazonaws.com/')
     parser.add_argument('--limit', '-l', type=int, default=1100)
     parser.add_argument('--model', type=str, default='dalle3', choices=['dalle3', 'sdxl', 'sd2', 'imagen', 'midjourney'])
+    parser.add_argument('--skip-until-id', type=int, default=0)
     args = parser.parse_args()
 
     session = aioboto3.Session(profile_name=args.profile)
@@ -45,6 +46,9 @@ async def amain():
     num_ids = set()
 
     for path in comparison_files:
+        if int(path.parent.name) < args.skip_until_id:
+            continue
+
         if len(num_ids) >= args.limit:
             break
 

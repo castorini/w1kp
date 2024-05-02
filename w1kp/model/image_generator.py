@@ -1,5 +1,5 @@
 __all__ = ['ImageGenerator', 'AzureOpenAIImageGenerator', 'StableDiffusionXLImageGenerator',
-           'StableDiffusion2ImageGenerator', 'ImagineApiMidjourneyGenerator']
+           'StableDiffusion2ImageGenerator', 'ImagineApiMidjourneyGenerator', 'GoogleImagenImageGenerator']
 
 import asyncio
 import json
@@ -13,6 +13,8 @@ import aiohttp
 from diffusers import DiffusionPipeline, StableDiffusionPipeline, DPMSolverMultistepScheduler
 from PIL import Image
 import torch
+import vertexai
+from vertexai.preview.vision_models import ImageGenerationModel
 
 from ..utils import set_seed
 
@@ -20,7 +22,7 @@ from ..utils import set_seed
 class ImageGenerator:
     @property
     def is_multiple(self) -> bool:
-        return False
+        return self.num_multiple > 1
 
     @property
     def num_multiple(self) -> int:
@@ -46,10 +48,6 @@ class ImagineApiMidjourneyGenerator(ImageGenerator):
         self.api_base = api_base
         self.api_key = api_key
         self.url = f'{self.api_base}/items/images/'
-
-    @property
-    def is_multiple(self) -> bool:
-        return True
 
     @property
     def num_multiple(self) -> int:
@@ -122,6 +120,37 @@ class StableDiffusionXLImageGenerator(ImageGenerator):
         image = self.pipe(prompt=prompt, num_inference_steps=30, add_watermarker=False, **kwargs).images[0]
 
         return dict(image=image, revised_prompt=prompt)
+
+
+class GoogleImagenImageGenerator(ImageGenerator):
+    def __init__(self, project_id: str):
+        # TODO(developer): Update and un-comment below lines
+        vertexai.init(project=project_id, location='us-central1')
+        self.model = ImageGenerationModel.from_pretrained('imagegeneration@006')
+
+    @property
+    def num_multiple(self) -> int:
+        return 4
+
+    async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
+        try:
+            images = self.model.generate_images(
+                prompt=prompt,
+                number_of_images=self.num_multiple,
+                language='en',
+                add_watermark=False,
+                seed=kwargs.get('seed', 0),
+                aspect_ratio='1:1',
+                safety_filter_level='block_some',
+                person_generation='allow_adult',
+            ).images
+
+            if not images:
+                return None
+
+            return [dict(image=image._pil_image, revised_prompt=prompt) for image in images]
+        except:
+            return None
 
 
 class AzureOpenAIImageGenerator(ImageGenerator):
