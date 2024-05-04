@@ -8,6 +8,7 @@ import random
 from typing import List, Tuple
 import uuid
 
+import numpy as np
 from PIL.Image import Image
 import PIL.Image
 from matplotlib import pyplot as plt

@@ -5,6 +5,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Tuple, Dict
 
+import PIL.Image
 import pandas as pd
 import torch
 from datasets import load_dataset
@@ -187,7 +188,12 @@ class LPIPSDataset(tud.Dataset):
         ims = []
 
         for im in (im1, im2, ref_im):
-            im_ = load_image(str(im))
+            if im.with_suffix('.npy').exists():
+                im_ = np.load(im.with_suffix('.npy'))
+                im_ = PIL.Image.fromarray(im_)
+            else:
+                im_ = load_image(str(im))
+
             ims.append(im_)
 
         return dict(image1=ims[0], image2=ims[1], ref_image=ims[2], judgement=judgement, prompt=prompt)

@@ -1,5 +1,6 @@
 __all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure',
-           'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure', 'GroupViTDistanceMeasure']
+           'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure', 'GroupViTDistanceMeasure',
+           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure']
 
 import itertools
 from typing import List, Dict, Tuple
@@ -9,6 +10,8 @@ import numpy as np
 import torch
 from DISTS_pytorch import DISTS
 from PIL.Image import Image
+from diffusers import StableDiffusionPipeline
+from skimage.metrics import structural_similarity as ssim
 from stlpips_pytorch import stlpips
 from torch import nn
 from torch.nn.functional import binary_cross_entropy_with_logits as bce_loss
@@ -62,8 +65,11 @@ class PairwiseDistanceMeasure:
     def to_listwise(self, num_sample: int = None) -> ListwiseDistanceMeasure:
         return PairsListwiseDistanceMeasure(self, num_sample=num_sample)
 
+    def set_loss_type(self, loss_type: str):
+        pass
 
-class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
+
+class DeepPairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
     def __init__(
             self,
             model: nn.Module,
@@ -168,12 +174,11 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
                 prompt = {k: v.to(self.device) for k, v in prompt.items()}
                 text_features = self.get_text_features(**prompt)
 
-                min_length = min(text_features.size(1), features1.size(0))
-                features1 = features1[:min_length]
-                features2 = features2[:min_length]
-                text_features = text_features[:, min_length]
-                features1 += text_features.squeeze()
-                features2 += text_features.squeeze()
+                dist1 = self.distance_function(features1, text_features, dim=-1).item()
+                dist2 = self.distance_function(features2, text_features, dim=-1).item()
+                dist3 = self.distance_function(features1, features2, dim=-1).item()
+
+                return dist1 + dist2 + dist3
 
             if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
                 dist = self.distance_function(features1, features2).item()
@@ -226,18 +231,19 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
             if self.use_text and self.tokenizer:
                 text_features = self.get_text_features(**prompt)
 
-                min_length = min(text_features.size(1), features1.size(1))
-                features1 = features1[:, :min_length]
-                features2 = features2[:, :min_length]
-                features_ref = features_ref[:, :min_length]
-                text_features = text_features[:, :min_length]
+                score1t = torch.nn.functional.cosine_similarity(features1, text_features, dim=-1)
+                scorert = torch.nn.functional.cosine_similarity(features_ref, text_features, dim=-1)
+                score1r = torch.nn.functional.cosine_similarity(features1, features_ref, dim=-1)
+                score2t = torch.nn.functional.cosine_similarity(features2, text_features, dim=-1)
+                score2r = torch.nn.functional.cosine_similarity(features2, features_ref, dim=-1)
 
-                features1 += text_features
-                features2 += text_features
-                features_ref += text_features
+                scores1 = torch.stack([score1r, scorert, score1t], 0).mean(0).clamp(-0.1, 1)
+                scores2 = torch.stack([score2r, scorert, score2t], 0).mean(0).clamp(-0.1, 1)
 
-            scores1 = -self.distance_function(features1, features_ref, dim=-1)
-            scores2 = -self.distance_function(features2, features_ref, dim=-1)
+                return self.a.exp() * (scores1 - scores2)
+            else:
+                scores1 = -self.distance_function(features1, features_ref, dim=-1)
+                scores2 = -self.distance_function(features2, features_ref, dim=-1)
         else:  # CoPer
             diffs1 = []
             diffs2 = []
@@ -275,7 +281,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
             scores2 = torch.stack(diffs2, 0).mean(0)
 
         if self.loss_type == 'bce':
-            return self.a * (scores1 - scores2)
+            return self.a.exp() * (scores1 - scores2)
         else:
             return scores1, scores2
 
@@ -283,7 +289,7 @@ class TrainablePairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
         return [p for p in self.parameters() if p.requires_grad]
 
 
-class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
+class DinoV2DistanceMeasure(DeepPairwiseMeasure):
     def __init__(self, model: str = 'facebook/dinov2-small', **kwargs):
         # In pilot experiments, DinoV2-small does best with two epochs of training and a weight decay of 0.2
         super().__init__(
@@ -304,7 +310,7 @@ class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
 
             param.requires_grad = False
 
-        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.a = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
@@ -320,7 +326,7 @@ class DinoV2DistanceMeasure(TrainablePairwiseMeasure):
         return self.model.config.hidden_size
 
 
-class ViTDistanceMeasure(TrainablePairwiseMeasure):
+class ViTDistanceMeasure(DeepPairwiseMeasure):
     def __init__(self, model: str = 'google/vit-base-patch32-224-in21k', **kwargs):
         super().__init__(
             ViTModel.from_pretrained(model),
@@ -342,7 +348,7 @@ class ViTDistanceMeasure(TrainablePairwiseMeasure):
 
             param.requires_grad = False
 
-        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.a = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
     def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
@@ -358,21 +364,26 @@ class ViTDistanceMeasure(TrainablePairwiseMeasure):
         return self.model.config.hidden_size
 
 
-class CLIPDistanceMeasure(TrainablePairwiseMeasure):
+class CLIPDistanceMeasure(DeepPairwiseMeasure):
     def __init__(
             self,
-            model: str = 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
+            model: str = 'apple/DFN5B-CLIP-ViT-H-14-378', # 'openai/clip-vit-base-patch32',  # 'openai/clip-vit-large-patch14-336', # 'openai/clip-vit-base-patch32', # 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
             default_featurizer: bool = False,
             use_text: bool = False,
             **kwargs
     ):
+        processor = 'laion/CLIP-ViT-H-14-laion2B-s32B-b79K' if 'apple/' in model else model
         super().__init__(
             CLIPModel.from_pretrained(model),
-            CLIPProcessor.from_pretrained(model),
+            CLIPProcessor.from_pretrained(processor),
             tokenizer=CLIPTokenizer.from_pretrained(model),
             use_text=use_text,
             **kwargs
         )
+
+        if 'apple/' in model:  # Apple models are missing preprocessor_config.json
+            self.processor.image_processor.size = dict(shortest_edge=384)
+            self.processor.image_processor.crop_size = dict(height=384, width=384)
 
         num_layers = len(self.model.vision_model.encoder.layers)
         trainable_names = {
@@ -390,7 +401,10 @@ class CLIPDistanceMeasure(TrainablePairwiseMeasure):
 
             param.requires_grad = False
 
-        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.a = nn.Parameter(torch.zeros(1), requires_grad=True)
+        self.a = self.model.logit_scale
+        self.a.requires_grad = True
+
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.eval()
         self.default_featurizer = default_featurizer
@@ -429,7 +443,7 @@ class CLIPDistanceMeasure(TrainablePairwiseMeasure):
             return pooled_output
 
 
-class GroupViTDistanceMeasure(TrainablePairwiseMeasure):
+class GroupViTDistanceMeasure(DeepPairwiseMeasure):
     def __init__(
             self,
             model: str = 'nvidia/groupvit-gcc-yfcc',
@@ -460,7 +474,7 @@ class GroupViTDistanceMeasure(TrainablePairwiseMeasure):
 
             param.requires_grad = False
 
-        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.a = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.eval()
         self.default_featurizer = default_featurizer
@@ -521,7 +535,7 @@ class STLPIPSProcessor:
 
 class DISTSProcessor:
     def __call__(self, images: List[Image], **kwargs) -> Dict[str, torch.Tensor]:
-        images = [image.resize((256, 256)) for image in images]  # best on 256x256
+        images = [image.resize((384, 384)) for image in images]  # best on 384x384
         images = [torch.tensor(np.array(image)).permute(2, 0, 1).float() / 255 for image in images]
         # <-- Note the lack of normalization here compared to LPIPS
         images = [image.unsqueeze(0) for image in images]
@@ -529,10 +543,10 @@ class DISTSProcessor:
         return dict(pixel_values=torch.cat(images))
 
 
-class DISTSDistanceMeasure(TrainablePairwiseMeasure):
+class DISTSDistanceMeasure(DeepPairwiseMeasure):
     def __init__(self, weights_path: str, **kwargs):
         super().__init__(DISTS(weights_path), DISTSProcessor(), **kwargs)
-        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.a = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
         for name, param in self.model.named_parameters():
@@ -566,17 +580,120 @@ class DISTSDistanceMeasure(TrainablePairwiseMeasure):
             return self.model(image1, image2).item()
 
 
-class LPIPSDistanceMeasure(TrainablePairwiseMeasure):
-    def __init__(self, network: str = 'alex', ft_dnn_only: bool = True, shift_tolerant: bool = False, **kwargs):
+class L2DistanceMeasure(DeepPairwiseMeasure):
+    def __init__(self, **kwargs):
+        super().__init__(nn.Module(), DISTSProcessor(), **kwargs)
+
+    def measure(self, prompt: str, image1: Image, image2: Image) -> float:
+        with torch.no_grad():
+            images = self.processor([image1, image2])['pixel_values']
+            image1, image2 = images
+            image1 = image1.to(self.device).unsqueeze(0)
+            image2 = image2.to(self.device).unsqueeze(0)
+
+            return (image1 - image2).norm(p=2).item()
+
+
+class SD2DistanceMeasure(PairwiseDistanceMeasure):
+    def __init__(self, **kwargs):
+        model_id = 'stabilityai/stable-diffusion-2-1'
+        self.pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+        self.pipe.to('cuda')
+        self.processor = self.pipe.image_processor
+        self.vae = self.pipe.vae
+        self.unet = self.pipe.unet
+        self.vae_scale_factor = self.pipe.vae_scale_factor
+        self.scheduler = self.pipe.scheduler
+
+    def _encode_vae_image(self, image: Image) -> torch.Tensor:
+        height = self.unet.config.sample_size * self.vae_scale_factor
+        width = self.unet.config.sample_size * self.vae_scale_factor
+        image = self.processor.preprocess(image, height=height, width=width)
+        image = image.to(dtype=torch.float32).cuda()
+        needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
+
+        if needs_upcasting:
+            self.vae.to(dtype=torch.float32)
+            image = image.to(next(iter(self.vae.post_quant_conv.parameters())).dtype)
+
+        image_latents = self.vae.encode(image).latent_dist.sample()
+        image_latents = self.vae.config.scaling_factor * image_latents
+
+        # cast back to fp16 if needed
+        if needs_upcasting:
+            self.vae.to(dtype=torch.float16)
+
+        return image_latents.half() / self.scheduler.init_noise_sigma  # unscale because we don't care about noise
+
+    def measure(self, prompt: str, image1: Image, image2: Image) -> float:
+        from daam import trace, cached_nlp
+
+        with trace(self.pipe) as tc:
+            latents1 = self._encode_vae_image(image1).half()
+            self.pipe(prompt, latents=latents1, num_inference_steps=1)
+            heat_map1 = tc.compute_global_heat_map(prompt=prompt)
+
+        with trace(self.pipe) as tc:
+            latents2 = self._encode_vae_image(image2).half()
+            self.pipe(prompt, latents=latents2, num_inference_steps=1)
+            heat_map2 = tc.compute_global_heat_map(prompt=prompt)
+
+        diffs = []
+
+        for token in cached_nlp(prompt):
+            # Discard punctuation and determiners
+            if token.is_punct or token.is_stop:
+                continue
+
+            try:
+                hm1 = heat_map1.compute_word_heat_map(token.text).heatmap.cuda()
+                hm2 = heat_map2.compute_word_heat_map(token.text).heatmap.cuda()
+                diffs.append((hm1 - hm2).norm(p=1).item())
+            except ValueError:
+                pass
+
+        return np.mean(diffs)
+
+
+class SSIMProcessor:
+    def __call__(self, images: List[Image], **kwargs) -> Dict[str, torch.Tensor]:
+        images = [image.resize((384, 384)) for image in images]  # best on 384x384
+        images = [torch.tensor(np.array(image)).permute(2, 0, 1) for image in images]
+        images = [image.unsqueeze(0) for image in images]
+
+        return dict(pixel_values=torch.cat(images))
+
+
+class SSIMDistanceMeasure(DeepPairwiseMeasure):
+    def __init__(self, **kwargs):
+        super().__init__(nn.Module(), SSIMProcessor(), **kwargs)
+
+    def measure(self, prompt: str, image1: Image, image2: Image) -> float:
+        with torch.no_grad():
+            images = self.processor([image1, image2])['pixel_values']
+            image1, image2 = images
+
+            return -ssim(image1.cpu().numpy(), image2.cpu().numpy(), channel_axis=0)
+
+
+class LPIPSDistanceMeasure(DeepPairwiseMeasure):
+    def __init__(
+            self,
+            network: str = 'alex',
+            ft_dnn_only: bool = True,
+            shift_tolerant: bool = False,
+            pretrained: bool = True,
+            **kwargs
+    ):
         if shift_tolerant:
-            model = stlpips.LPIPS(net=network, variant='shift_tolerant')
+            model = stlpips.LPIPS(net=network, variant='shift_tolerant', pretrained=pretrained)
             processor = STLPIPSProcessor()
         else:
-            model = lpips.LPIPS(net=network)
+            model = lpips.LPIPS(net=network, pretrained=pretrained)
             processor = LPIPSProcessor()
 
         super().__init__(model, processor, use_dynamo=False, **kwargs)
-        self.a = nn.Parameter(torch.ones(1), requires_grad=True)
+        self.a = nn.Parameter(torch.zeros(1), requires_grad=True)
         self.b = nn.Parameter(torch.zeros(1), requires_grad=True)
 
         for name, param in self.model.named_parameters():
