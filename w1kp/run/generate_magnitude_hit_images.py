@@ -13,7 +13,8 @@ from matplotlib import pyplot as plt
 from tqdm.asyncio import tqdm
 import aioboto3
 
-from w1kp import DinoV2DistanceMeasure, LPIPSDistanceMeasure
+from w1kp import DinoV2DistanceMeasure, LPIPSDistanceMeasure, CLIPDistanceMeasure
+from w1kp.model.distance import DreamSimDistanceMeasure
 
 
 async def amain():
@@ -51,7 +52,7 @@ async def amain():
     parser.add_argument('--suffix', type=str, default='')
     args = parser.parse_args()
 
-    measure = LPIPSDistanceMeasure(network='vgg')
+    measure = DreamSimDistanceMeasure()
 
     if args.model_path:
         measure.load_state_dict(torch.load(args.model_path))

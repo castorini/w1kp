@@ -203,7 +203,10 @@ class Comparison2AFCExperiment(BaseModel):
         return f'2AFC<<{self.id1} vs. {self.id2} (ref: {self.ref_id}; gt: {self.ground_truth})>>'
 
     def load_prompt(self) -> str:
-        return (self.root_folder / self.model_name / self.id / self.seed1 / 'prompt.txt').read_text()
+        try:
+            return (self.root_folder / self.model_name / self.id / self.seed1 / 'prompt.txt').read_text()
+        except UnicodeDecodeError:
+            return ''
 
     def model_post_init(self, *args, **kwargs):
         if self.root_folder is not None:

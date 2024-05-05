@@ -1,6 +1,6 @@
 __all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure',
            'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure', 'GroupViTDistanceMeasure',
-           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure']
+           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure', 'SSCDDistanceMeasure']
 
 import itertools
 from typing import List, Dict, Tuple
@@ -11,10 +11,12 @@ import torch
 from DISTS_pytorch import DISTS
 from PIL.Image import Image
 from diffusers import StableDiffusionPipeline
+from dreamsim import dreamsim
 from skimage.metrics import structural_similarity as ssim
 from stlpips_pytorch import stlpips
 from torch import nn
 from torch.nn.functional import binary_cross_entropy_with_logits as bce_loss
+from torchvision import transforms
 from transformers import CLIPModel, CLIPProcessor, ViTImageProcessor, ViTModel, AutoImageProcessor, \
     Dinov2Model, AutoTokenizer, CLIPTokenizer, GroupViTModel, AutoProcessor
 
@@ -178,7 +180,10 @@ class DeepPairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
                 dist2 = self.distance_function(features2, text_features, dim=-1).item()
                 dist3 = self.distance_function(features1, features2, dim=-1).item()
 
-                return dist1 + dist2 + dist3
+                D = (dist1 + dist2 + dist3) / 3
+                D = dist3
+
+                return D / 1.1  # normalize to [0, 1]
 
             if self.loss_type == 'bce' or self.loss_type == 'bce-rank':
                 dist = self.distance_function(features1, features2).item()
@@ -229,16 +234,18 @@ class DeepPairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
             features_ref = outputs_ref['features']
 
             if self.use_text and self.tokenizer:
-                text_features = self.get_text_features(**prompt)
+                # text_features = self.get_text_features(**prompt)  # disable for now
 
-                score1t = torch.nn.functional.cosine_similarity(features1, text_features, dim=-1)
-                scorert = torch.nn.functional.cosine_similarity(features_ref, text_features, dim=-1)
+                # score1t = torch.nn.functional.cosine_similarity(features1, text_features, dim=-1)
+                # scorert = torch.nn.functional.cosine_similarity(features_ref, text_features, dim=-1)
                 score1r = torch.nn.functional.cosine_similarity(features1, features_ref, dim=-1)
-                score2t = torch.nn.functional.cosine_similarity(features2, text_features, dim=-1)
+                # score2t = torch.nn.functional.cosine_similarity(features2, text_features, dim=-1)
                 score2r = torch.nn.functional.cosine_similarity(features2, features_ref, dim=-1)
 
-                scores1 = torch.stack([score1r, scorert, score1t], 0).mean(0).clamp(-0.1, 1)
-                scores2 = torch.stack([score2r, scorert, score2t], 0).mean(0).clamp(-0.1, 1)
+                # scores1 = torch.stack([score1r, scorert, score1t], 0).mean(0).clamp(-0.1, 1)
+                # scores2 = torch.stack([score2r, scorert, score2t], 0).mean(0).clamp(-0.1, 1)
+                scores1 = torch.stack([score1r], 0).mean(0).clamp(-0.1, 1)
+                scores2 = torch.stack([score2r], 0).mean(0).clamp(-0.1, 1)
 
                 return self.a.exp() * (scores1 - scores2)
             else:
@@ -290,7 +297,7 @@ class DeepPairwiseMeasure(nn.Module, PairwiseDistanceMeasure):
 
 
 class DinoV2DistanceMeasure(DeepPairwiseMeasure):
-    def __init__(self, model: str = 'facebook/dinov2-small', **kwargs):
+    def __init__(self, model: str = 'facebook/dinov2-large', **kwargs):
         # In pilot experiments, DinoV2-small does best with two epochs of training and a weight decay of 0.2
         super().__init__(
             Dinov2Model.from_pretrained(model),
@@ -367,11 +374,12 @@ class ViTDistanceMeasure(DeepPairwiseMeasure):
 class CLIPDistanceMeasure(DeepPairwiseMeasure):
     def __init__(
             self,
-            model: str = 'apple/DFN5B-CLIP-ViT-H-14-378', # 'openai/clip-vit-base-patch32',  # 'openai/clip-vit-large-patch14-336', # 'openai/clip-vit-base-patch32', # 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
+            model: str = 'openai/clip-vit-large-patch14-336', # 'openai/clip-vit-base-patch32',  # 'openai/clip-vit-large-patch14-336', # 'openai/clip-vit-base-patch32', # 'laion/CLIP-ViT-B-32-laion2B-s34B-b79K',
             default_featurizer: bool = False,
             use_text: bool = False,
             **kwargs
     ):
+        # Apple models are missing preprocessor_config.json
         processor = 'laion/CLIP-ViT-H-14-laion2B-s32B-b79K' if 'apple/' in model else model
         super().__init__(
             CLIPModel.from_pretrained(model),
@@ -381,7 +389,8 @@ class CLIPDistanceMeasure(DeepPairwiseMeasure):
             **kwargs
         )
 
-        if 'apple/' in model:  # Apple models are missing preprocessor_config.json
+        if 'apple/' in model:
+            # Update to match Apple's settings
             self.processor.image_processor.size = dict(shortest_edge=384)
             self.processor.image_processor.crop_size = dict(height=384, width=384)
 
@@ -592,6 +601,61 @@ class L2DistanceMeasure(DeepPairwiseMeasure):
             image2 = image2.to(self.device).unsqueeze(0)
 
             return (image1 - image2).norm(p=2).item()
+
+
+class SSCDProcessor:
+    def __call__(self, images: List[Image], **kwargs) -> Dict[str, torch.Tensor]:
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225],
+        )
+
+        small_288 = transforms.Compose([
+            transforms.Resize(288),
+            transforms.ToTensor(),
+            normalize,
+        ])
+
+        images = [small_288(image) for image in images]
+        images = [image.unsqueeze(0) for image in images]
+
+        return dict(pixel_values=torch.cat(images))
+
+
+class DreamSimDistanceMeasure(DeepPairwiseMeasure):
+    def __init__(self, **kwargs):
+        model, self.preprocess = dreamsim(pretrained=True)
+        super().__init__(model, None, use_dynamo=False, **kwargs)
+        self.distance_type = 'l2'
+
+    def measure(self, prompt: str, image1: Image, image2: Image) -> float:
+        with torch.no_grad():
+            im1 = self.preprocess(image1).cuda()
+            im2 = self.preprocess(image2).cuda()
+
+            if self.distance_type == 'l2':
+                embed_a = self.model.embed(im1)
+                embed_b = self.model.embed(im2)
+
+                return (embed_a - embed_b).norm(p=2).item() ** 2
+            else:
+                return self.model(im1, im2)  # this is slightly worse for some reason
+
+
+class SSCDWrapper(nn.Module):
+    def __init__(self, weights_path: str):
+        super().__init__()
+        self.model = torch.jit.load(weights_path)
+
+    def forward(self, pixel_values) -> torch.Tensor:
+        return self.model(pixel_values)
+
+
+class SSCDDistanceMeasure(DeepPairwiseMeasure):
+    def __init__(self, weights_path: str, **kwargs):
+        super().__init__(SSCDWrapper(weights_path), SSCDProcessor(), use_dynamo=False, **kwargs)
+
+    def get_image_features(self, pixel_values: torch.FloatTensor | None = None, **kwargs):
+        return dict(features=self.model(pixel_values))
 
 
 class SD2DistanceMeasure(PairwiseDistanceMeasure):

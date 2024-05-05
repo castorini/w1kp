@@ -1,4 +1,4 @@
-__all__ = ['set_seed', 'load_image', 'apply_ema']
+__all__ = ['set_seed', 'load_image', 'apply_ema', 'compute_cdf', 'query_inverted_cdf']
 
 from functools import lru_cache
 import random
@@ -44,3 +44,16 @@ def apply_ema(model: nn.Module, decay: float = 0.95):
         if param.requires_grad:
             param.data.mul_(1 - decay).add_(EMA_WEIGHTS[name], alpha=decay)
             EMA_WEIGHTS[name].copy_(param.data)
+
+
+def compute_cdf(data: np.ndarray, left=0, right=1):
+    data = data.reshape(-1)
+    data = np.hstack([np.array([left]), data, np.array([right])])
+    cdf_x = np.sort(data)
+    cdf_y = np.arange(len(data)) / len(data)
+
+    return cdf_x, cdf_y
+
+
+def query_inverted_cdf(cdf_x: np.ndarray, cdf_y: np.ndarray, queries: np.ndarray) -> np.ndarray:
+    return np.interp(queries, cdf_x, cdf_y)

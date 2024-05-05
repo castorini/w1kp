@@ -1,7 +1,8 @@
-from collections import Counter
+from collections import Counter, defaultdict
 import argparse
 import asyncio
 
+import pandas as pd
 import torch
 import torch.utils.data as tud
 from tqdm import tqdm, trange
@@ -9,7 +10,8 @@ from transformers import BatchEncoding
 
 from w1kp import LPIPSDistanceMeasure, HitBatch, CLIPDistanceMeasure, ViTDistanceMeasure, \
     DinoV2DistanceMeasure, LPIPSCollator, StratifiedIDSampler
-from w1kp.model.distance import DISTSDistanceMeasure, GroupViTDistanceMeasure, L2DistanceMeasure, SSIMDistanceMeasure, SD2DistanceMeasure
+from w1kp.model.distance import DISTSDistanceMeasure, GroupViTDistanceMeasure, L2DistanceMeasure, SSIMDistanceMeasure, \
+    SD2DistanceMeasure, SSCDDistanceMeasure, DreamSimDistanceMeasure
 from w1kp.utils import apply_ema
 
 
@@ -23,7 +25,7 @@ Some notes:
 
 async def amain():
     choices = ['lpips-alex', 'lpips-vgg', 'lpips-squeeze', 'clip', 'vit', 'oracle', 'dino-v2', 'dists',
-               'stlpips-alex', 'stlpips-vgg', 'group-vit', 'l2', 'ssim', 'sd2']
+               'stlpips-alex', 'stlpips-vgg', 'group-vit', 'l2', 'ssim', 'sd2', 'sscd', 'dreamsim']
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--train-files', '-i', type=str, nargs='+', required=True)
@@ -81,6 +83,10 @@ async def amain():
             measure = SSIMDistanceMeasure()
         case 'sd2':
             measure = SD2DistanceMeasure()
+        case 'sscd':
+            measure = SSCDDistanceMeasure(args.weights_path)
+        case 'dreamsim':
+            measure = DreamSimDistanceMeasure()
         case _:
             measure = None
 
@@ -162,6 +168,7 @@ async def amain():
             measure.eval()
 
     results = Counter()
+    data = defaultdict(list)
 
     for test_batch in test_batches:
         pbar = tqdm(test_batch.iter_group_by_seed())
@@ -188,6 +195,9 @@ async def amain():
 
             results['2afc'] += a_pct if m1 < m2 else 1 - a_pct
             results['acc'] += 0 if m1 <= m2 and a_pct < 0.5 or m1 >= m2 and a_pct > 0.5 else 1
+            data['m1'].append(m1)
+            data['m2'].append(m2)
+            data['a_pct'].append(a_pct)
             tot_num += 1
 
             pbar.set_postfix(**{k: f'{v / tot_num:.4f}' for k, v in results.items()})
@@ -198,6 +208,8 @@ async def amain():
         print({k: f'{v / tot_num:.4f}' for k, v in results.items()})
         print()
         print()
+
+    pd.DataFrame(data).to_csv('data.csv')
 
 
 def main():
