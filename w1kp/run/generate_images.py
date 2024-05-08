@@ -21,12 +21,13 @@ async def amain():
     parser.add_argument('--model', type=str, default='dalle3', choices=models)
     parser.add_argument('--midjourney-api-key', type=str)
     parser.add_argument('--imagen-project-id', type=str)
-    parser.add_argument('--type', '-t', type=str, default='diffusiondb', choices=['diffusiondb', 'stdin', 'cli', 'folder'])
+    parser.add_argument('--type', '-t', type=str, default='diffusiondb', choices=['diffusiondb', 'stdin', 'cli', 'folder', 'wordnet'])
     parser.add_argument('--load-folder', '-lf', type=str)
     parser.add_argument('--filter-guidance', '-fg', type=float, default=7.0)
     parser.add_argument('--prompts', '-p', type=str, nargs='+')
     parser.add_argument('--regenerate', '-r', action='store_true')
     parser.add_argument('--skip-num', '-sn', type=int, default=0, help='The number of prompts to skip from the beginning')
+    parser.add_argument('--start-id', '-sid', type=int, default=0)
     args = parser.parse_args()
 
     match args.type:
@@ -36,6 +37,9 @@ async def amain():
             prompt_dataset = PromptDataset.from_stdin()
         case 'cli':
             prompt_dataset = PromptDataset(args.prompts)
+        case 'wordnet':
+            prompt_dataset = PromptDataset.from_stdin()
+            prompt_dataset = prompt_dataset.filter_wordnet()
         case 'folder':
             folder = args.load_folder if args.load_folder else args.output_folder
             folder = Path(folder)
@@ -85,7 +89,7 @@ async def amain():
             exp = GenerationExperiment(
                 prompt,
                 model_name=args.model,
-                id=str(ds_idx),
+                id=str(ds_idx + args.start_id),
                 seed=seed,
                 root_folder=args.output_folder
             )
@@ -123,7 +127,7 @@ async def amain():
                     seed=str(sub_seed_idx),
                     model_name=args.model,
                     image=gen_image,
-                    id=str(ds_idx),
+                    id=str(ds_idx + args.start_id),
                     root_folder=args.output_folder
                 )
 

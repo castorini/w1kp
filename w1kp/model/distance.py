@@ -1,6 +1,6 @@
-__all__ = ['RGBColorFeatureExtractor', 'PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure',
+__all__ = ['PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure',
            'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure', 'GroupViTDistanceMeasure',
-           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure', 'SSCDDistanceMeasure']
+           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure', 'SSCDDistanceMeasure', 'DreamSimDistanceMeasure']
 
 import itertools
 from typing import List, Dict, Tuple
@@ -621,11 +621,57 @@ class SSCDProcessor:
         return dict(pixel_values=torch.cat(images))
 
 
+class ListwiseDreamSimDistanceMeasure(ListwiseDistanceMeasure):
+    def __init__(self, measure: 'DreamSimDistanceMeasure' = None):
+        if measure is None:
+            measure = DreamSimDistanceMeasure()
+
+        self.measure_ = measure
+
+    def measure(self, _, images: List[Image], reduce: str = 'mean', **kwargs) -> float | Dict[str, float]:
+        """
+        Args:
+            reduce (str): One of 'mean', 'min', 'u5', 'all'. U5 expected minimum distance among 5 images, estimated by
+            subsampling for a U-statistic estimator. If 'all' is specified, a dictionary containing all three metrics is
+            returned.
+        """
+        with torch.no_grad():
+            images = [self.measure_.preprocess(image).cuda() for image in images]
+            image_tensor = torch.cat(images)
+            embeds = self.measure_.model.embed(image_tensor)
+            pairwise_l2 = torch.cdist(embeds, embeds, p=2).pow(2)
+            pairwise_l2_nonzero = pairwise_l2[torch.where(pairwise_l2 != 0)]  # remove self-distances
+
+            ret = {}
+
+            if reduce == 'mean' or reduce == 'all':
+                ret['mean'] = pairwise_l2_nonzero.mean().item()
+
+            if reduce == 'min' or reduce == 'all':
+                ret['min'] = pairwise_l2_nonzero.min().item()
+
+            if reduce == 'u5' or reduce == 'all':
+                dists = []
+
+                for _ in range(1000):
+                    idx = torch.randperm(len(images))[:5]
+                    pl2 = pairwise_l2[idx][:, idx]
+                    pl2 = pl2[torch.where(pl2 != 0)]
+                    dists.append(pl2.min().item())
+
+                ret['u5'] = float(np.mean(dists))
+
+            return ret if reduce == 'all' else ret[reduce]
+
+
 class DreamSimDistanceMeasure(DeepPairwiseMeasure):
     def __init__(self, **kwargs):
         model, self.preprocess = dreamsim(pretrained=True)
         super().__init__(model, None, use_dynamo=False, **kwargs)
         self.distance_type = 'l2'
+
+    def to_listwise(self, num_sample: int = None) -> ListwiseDreamSimDistanceMeasure:
+        return ListwiseDreamSimDistanceMeasure(self)
 
     def measure(self, prompt: str, image1: Image, image2: Image) -> float:
         with torch.no_grad():
@@ -786,52 +832,3 @@ class LPIPSDistanceMeasure(DeepPairwiseMeasure):
             image2 = image2.to(self.device)
 
             return self.model(image1, image2).item()
-
-
-class RGBColorFeatureExtractor:
-    def __init__(self, image: Image):
-        self.image = image
-
-    def mean_area(self, channel: str, hue_tolerances: List[int] = [15, 30, 40], saturation_threshold: int = 10) -> float:
-        match channel:
-            case 'r' | 'red':
-                channel_hue_center = 0
-                channel = 0
-            case 'g' | 'green':
-                channel_hue_center = 120
-                channel = 1
-            case 'b' | 'blue':
-                channel_hue_center = 220
-                channel = 2
-            case _:
-                raise ValueError(f'Invalid channel {channel}')
-
-        pixels = np.array(self.image.getdata())
-
-        # RGB to HSL
-        pixels = pixels / 255
-        cmax = np.max(pixels, axis=1)
-        cmin = np.min(pixels, axis=1)
-        delta = cmax - cmin
-
-        # Hue
-        hue = np.zeros(len(pixels))
-        hue[cmax == cmin] = 0
-        hue[cmax == pixels[:, 0]] = 60 * (((pixels[cmax == pixels[:, 0], 1] - pixels[cmax == pixels[:, 0], 2]) / delta[cmax == pixels[:, 0]]) % 6)
-        hue[cmax == pixels[:, 1]] = 60 * (((pixels[cmax == pixels[:, 1], 2] - pixels[cmax == pixels[:, 1], 0]) / delta[cmax == pixels[:, 1]]) + 2)
-        hue[cmax == pixels[:, 2]] = 60 * (((pixels[cmax == pixels[:, 2], 0] - pixels[cmax == pixels[:, 2], 1]) / delta[cmax == pixels[:, 2]]) + 4)
-
-        # Saturation
-        saturation = np.zeros(len(pixels))
-        saturation[cmax != 0] = delta[cmax != 0] / cmax[cmax != 0]
-
-        mask = np.zeros(len(pixels))
-
-        if channel == 0:
-            mask[np.abs(((hue + 180) % 360) - (channel_hue_center + 180)) <= hue_tolerances[channel]] = 1
-        else:
-            mask[np.abs(hue - channel_hue_center) <= hue_tolerances[channel]] = 1
-
-        mask[saturation < saturation_threshold / 100] = 0
-
-        return np.mean(mask)

@@ -13,8 +13,7 @@ from matplotlib import pyplot as plt
 from tqdm.asyncio import tqdm
 import aioboto3
 
-from w1kp import DinoV2DistanceMeasure, LPIPSDistanceMeasure, CLIPDistanceMeasure
-from w1kp.model.distance import DreamSimDistanceMeasure
+from w1kp import DreamSimDistanceMeasure
 
 
 async def amain():
@@ -46,6 +45,7 @@ async def amain():
     parser.add_argument('--input-folder', '-i', required=True, type=Path)
     parser.add_argument('--output-path', '-o', type=Path, default='magnitude-outputs')
     parser.add_argument('--distance-only', '-do', action='store_true')
+    parser.add_argument('--no-distance', '-nd', action='store_true')
     parser.add_argument('--model', type=str, default='dalle3', choices=['dalle3', 'sdxl', 'sd2', 'imagen', 'midjourney'])
     parser.add_argument('--attn-prob', type=float, default=0.2)
     parser.add_argument('--limit', type=int, default=300)
@@ -60,8 +60,10 @@ async def amain():
     data_rows = []
     args.output_path.mkdir(exist_ok=True, parents=True)
     num = 0
+    paths = list((args.input_folder / args.model).iterdir())
+    paths.sort(key=lambda x: int(x.name))
 
-    for path in (args.input_folder / args.model).iterdir():
+    for path in tqdm(paths):
         if num >= args.limit:
             break
 
@@ -80,13 +82,23 @@ async def amain():
         image_b = PIL.Image.open(image_b)
 
         if not args.distance_only:
-            fig, ax = plot_images(image_a, image_b)
+            try:
+                fig, ax = plot_images(image_a, image_b)
+            except:
+                continue
+
             plt.savefig(args.output_path / f'{args.model}-{id}-true.jpg', bbox_inches='tight')
             plt.close(fig)
 
-        distance = measure.measure('unused', image_a, image_b)
+        if args.no_distance:
+            distance = 0
+        else:
+            try:
+                distance = measure.measure('unused', image_a, image_b)
+            except:
+                continue
+
         data_rows.append(dict(distance=distance, image_url=f'{args.model}-{id}-true.jpg'))
-        print(distance, path)
 
         if random.random() < args.attn_prob and not args.distance_only:
             fig, ax = plot_images(image_b, image_b)

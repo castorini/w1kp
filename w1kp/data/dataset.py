@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 
 import PIL.Image
+import nltk
 import pandas as pd
 import torch
 from datasets import load_dataset
+from nltk.corpus import wordnet as wn
 import numpy as np
 from PIL import Image
 import torch.utils.data as tud
@@ -52,6 +54,24 @@ class PromptDataset(tud.Dataset):
     @classmethod
     def from_diffusiondb(cls, split: str = '2m_random_100k', **kwargs) -> 'PromptDataset':
         return cls.from_dataset('poloclub/diffusiondb', split, 'prompt', **kwargs)
+
+    def filter_wordnet(self) -> 'PromptDataset':
+        nltk.download('wordnet')
+        prompts = []
+
+        for candidate in self.prompts:
+            candidate = candidate.lower().strip()
+            synsets = wn.synsets(candidate)
+
+            if not synsets:
+                continue
+
+            if all(x.pos() != 'n' for x in synsets):
+                continue
+
+            prompts.append(candidate)
+
+        return PromptDataset(prompts)
 
     @classmethod
     def from_stdin(cls) -> 'PromptDataset':
