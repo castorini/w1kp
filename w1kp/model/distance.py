@@ -1,13 +1,18 @@
 __all__ = ['PairwiseDistanceMeasure', 'LPIPSDistanceMeasure', 'ListwiseDistanceMeasure',
            'CLIPDistanceMeasure', 'ViTDistanceMeasure', 'DinoV2DistanceMeasure', 'GroupViTDistanceMeasure',
-           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure', 'SSCDDistanceMeasure', 'DreamSimDistanceMeasure']
+           'L2DistanceMeasure', 'SSIMDistanceMeasure', 'SD2DistanceMeasure', 'SSCDDistanceMeasure', 'DreamSimDistanceMeasure',
+           'ListwiseDistanceMeasureServer', 'ListwiseDistanceMeasureClient']
 
+import base64
 import itertools
+from io import BytesIO
 from typing import List, Dict, Tuple
 
+import PIL.Image
 import lpips
 import numpy as np
 import torch
+import zmq
 from DISTS_pytorch import DISTS
 from PIL.Image import Image
 from diffusers import StableDiffusionPipeline
@@ -24,6 +29,57 @@ from transformers import CLIPModel, CLIPProcessor, ViTImageProcessor, ViTModel, 
 class ListwiseDistanceMeasure:
     def measure(self, prompt: str, images: List[Image], **kwargs) -> float:
         raise NotImplementedError
+
+
+class ListwiseDistanceMeasureServer:
+    def __init__(self, zero_mq_url: str, measure: ListwiseDistanceMeasure):
+        self.zero_mq_url = zero_mq_url
+        self.measure = measure
+
+    def run(self):
+        context = zmq.Context()
+        socket = context.socket(zmq.REP)
+        socket.bind(self.zero_mq_url)
+
+        while True:
+            message = socket.recv_json()
+            prompt = message['prompt']
+            reduce = message['reduce']
+            images = []
+            print('Received', prompt, len(message['images']))
+
+            for image_string in message['images']:
+                with PIL.Image.open(BytesIO(base64.b64decode(image_string))) as image:
+                    images.append(image.copy())
+
+            result = self.measure.measure(prompt, images, reduce=reduce)
+            response = dict(result=result)
+            socket.send_json(response)
+
+
+class ListwiseDistanceMeasureClient(ListwiseDistanceMeasure):
+    def __init__(self, zero_mq_url: str):
+        self.zero_mq_url = zero_mq_url
+
+    def measure(self, prompt: str, images: List[Image], **kwargs) -> float | Dict[str, float]:
+        context = zmq.Context()
+        socket = context.socket(zmq.REQ)
+        socket.connect(self.zero_mq_url)
+
+        image_strings = []
+
+        for image in images:
+            buffer = BytesIO()
+            image.save(buffer, format='PNG')
+            image_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            image_strings.append(image_str)
+
+        message = dict(prompt=prompt, images=image_strings, **kwargs)
+        socket.send_json(message)
+        response = socket.recv_json()
+        socket.close()
+
+        return response['result']
 
 
 class PairsListwiseDistanceMeasure(ListwiseDistanceMeasure):
@@ -631,16 +687,17 @@ class ListwiseDreamSimDistanceMeasure(ListwiseDistanceMeasure):
     def measure(self, _, images: List[Image], reduce: str = 'mean', **kwargs) -> float | Dict[str, float]:
         """
         Args:
-            reduce (str): One of 'mean', 'min', 'u5', 'all'. U5 expected minimum distance among 5 images, estimated by
-            subsampling for a U-statistic estimator. If 'all' is specified, a dictionary containing all three metrics is
-            returned.
+            reduce (str): One of 'mean', 'min', 'u5', 'all', 'reusability'. U5 expected minimum distance among
+            5 images, estimated by subsampling for a U-statistic estimator. If 'all' is specified, a dictionary
+            containing all three metrics is returned. If 'reusability' is specified, the u5, u10, u25, u50, u100, u150,
+            and u200 metrics are computed and returned along with the median minimum indices, which may take a while.
         """
         with torch.no_grad():
             images = [self.measure_.preprocess(image).cuda() for image in images]
             image_tensor = torch.cat(images)
             embeds = self.measure_.model.embed(image_tensor)
             pairwise_l2 = torch.cdist(embeds, embeds, p=2).pow(2)
-            pairwise_l2_nonzero = pairwise_l2[torch.where(pairwise_l2 != 0)]  # remove self-distances
+            pairwise_l2_nonzero = pairwise_l2[torch.where(pairwise_l2 > 1e-4)]  # remove self-distances
 
             ret = {}
 
@@ -650,18 +707,31 @@ class ListwiseDreamSimDistanceMeasure(ListwiseDistanceMeasure):
             if reduce == 'min' or reduce == 'all':
                 ret['min'] = pairwise_l2_nonzero.min().item()
 
-            if reduce == 'u5' or reduce == 'all':
-                dists = []
+            if reduce == 'u5' or reduce == 'all' or reduce == 'reusability':
+                sizes = [5, 10, 25, 50, 100, 150, 200] if reduce == 'reusability' else [5]
 
-                for _ in range(1000):
-                    idx = torch.randperm(len(images))[:5]
-                    pl2 = pairwise_l2[idx][:, idx]
-                    pl2 = pl2[torch.where(pl2 != 0)]
-                    dists.append(pl2.min().item())
+                for size in sizes:
+                    dists = []
+                    min_indices = []
 
-                ret['u5'] = float(np.mean(dists))
+                    for _ in range(1000):
+                        perm = torch.randperm(len(images))
+                        perm_map = {i: j.item() for i, j in enumerate(perm)}
+                        perm_size = min(size, len(images))
+                        idx = perm[:perm_size]
 
-            return ret if reduce == 'all' else ret[reduce]
+                        pl2 = pairwise_l2[idx][:, idx]
+                        pl2.fill_diagonal_(1e7)
+                        dists.append(pl2.min().item())
+                        avg_min_idx = pl2.argmin().item()
+                        min_indices.append((pl2.min().item(), (perm_map[avg_min_idx // perm_size], perm_map[avg_min_idx % perm_size])))
+
+                    min_indices.sort(key=lambda x: x[0])
+                    avg_min_idx = min_indices[len(min_indices) // 2][1]
+                    ret[f'u{size}_avg_min_idx'] = avg_min_idx
+                    ret[f'u{size}'] = float(np.mean(dists))
+
+            return ret if reduce == 'all' or reduce == 'reusability' else ret[reduce]
 
 
 class DreamSimDistanceMeasure(DeepPairwiseMeasure):

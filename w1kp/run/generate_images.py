@@ -7,11 +7,11 @@ from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 
 from w1kp import PromptDataset, AzureOpenAIImageGenerator, GenerationExperiment, StableDiffusionXLImageGenerator, \
-    StableDiffusion2ImageGenerator, ImagineApiMidjourneyGenerator, GoogleImagenImageGenerator
+    StableDiffusion2ImageGenerator, ImagineApiMidjourneyGenerator, GoogleImagenImageGenerator, AsyncSDXLClient
 
 
 async def amain():
-    models = ['sdxl', 'sd2', 'dalle3', 'imagen', 'midjourney']
+    models = ['sdxl', 'sd2', 'dalle3', 'imagen', 'midjourney', 'async-sdxl']
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--output-folder', '-o', type=str, default='output')
@@ -26,8 +26,10 @@ async def amain():
     parser.add_argument('--filter-guidance', '-fg', type=float, default=7.0)
     parser.add_argument('--prompts', '-p', type=str, nargs='+')
     parser.add_argument('--regenerate', '-r', action='store_true')
+    parser.add_argument('--regenerate-only-if-present', '-ro', action='store_true')
     parser.add_argument('--skip-num', '-sn', type=int, default=0, help='The number of prompts to skip from the beginning')
     parser.add_argument('--start-id', '-sid', type=int, default=0)
+    parser.add_argument('--async-sdxl-urls', '-asu', type=str, nargs='+')
     args = parser.parse_args()
 
     match args.type:
@@ -58,6 +60,11 @@ async def amain():
             image_gens = AzureOpenAIImageGenerator.parse_from_path(args.azure_keys_config)
         case 'sdxl':
             image_gens = [StableDiffusionXLImageGenerator()]
+        case 'async-sdxl':
+            if args.async_sdxl_urls is None:
+                raise ValueError('Async SDXL URLs required (--async-sdxl-urls) for model async-sdxl')
+
+            image_gens = [AsyncSDXLClient(url) for url in args.async_sdxl_urls]
         case 'sd2':
             image_gens = [StableDiffusion2ImageGenerator()]
         case 'midjourney':
@@ -83,6 +90,7 @@ async def amain():
             break
 
         skip = False
+        exists = False
 
         for seed in range(num_images_per_seed):
             seed = str(seed)
@@ -94,12 +102,15 @@ async def amain():
                 root_folder=args.output_folder
             )
 
-            if exp.get_path('image.png').exists() and not args.regenerate:
+            if exp.get_path('image.png').parent.parent.exists():
+                exists = True
+
+            if exp.get_path('image.png').exists() and (not args.regenerate and not args.regenerate_only_if_present):
                 print(f'Skipping {ds_idx}')
                 skip = True
                 break
 
-        if skip:
+        if skip or (not exists and args.regenerate_only_if_present):
             continue
 
         print(f'Generating prompt {ds_idx}: {prompt}')
@@ -132,6 +143,7 @@ async def amain():
                 )
 
                 exp.save(overwrite=True)
+                gen_image.close()
 
 
 def main():

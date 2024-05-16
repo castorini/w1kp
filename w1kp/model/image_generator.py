@@ -1,15 +1,21 @@
 __all__ = ['ImageGenerator', 'AzureOpenAIImageGenerator', 'StableDiffusionXLImageGenerator',
-           'StableDiffusion2ImageGenerator', 'ImagineApiMidjourneyGenerator', 'GoogleImagenImageGenerator']
+           'StableDiffusion2ImageGenerator', 'ImagineApiMidjourneyGenerator', 'GoogleImagenImageGenerator',
+           'AsyncSDXLClient', 'AsyncSDXLServer']
 
 import asyncio
+import base64
 import json
 import logging
+import random
 from io import BytesIO
 from pathlib import Path
 import time
 from typing import List, Dict, Any
 
 import aiohttp
+import numpy as np
+import zmq
+import zmq.asyncio
 from diffusers import DiffusionPipeline, StableDiffusionPipeline, DPMSolverMultistepScheduler
 from PIL import Image
 import torch
@@ -122,35 +128,82 @@ class StableDiffusionXLImageGenerator(ImageGenerator):
         return dict(image=image, revised_prompt=prompt)
 
 
+class AsyncSDXLServer:
+    # Server counterpart to AsyncSDXLClient; runs in a ZeroMQ loop
+    def __init__(self, zero_mq_url: str, generator: StableDiffusionXLImageGenerator):
+        self.zero_mq_url = zero_mq_url
+        self.generator = generator
+
+    async def run(self):
+        context = zmq.asyncio.Context()
+        socket = context.socket(zmq.REP)
+        socket.bind(self.zero_mq_url)
+
+        while True:
+            message = await socket.recv_json()
+            prompt = message['prompt']
+            seed = message.get('seed', 0)
+
+            image = (await self.generator.generate_image(prompt, seed=seed))['image']
+            buffer = BytesIO()
+            image.save(buffer, format='PNG')
+            image_str = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            response = dict(image=image_str)
+
+            socket.send_json(response)
+
+
+class AsyncSDXLClient(ImageGenerator):
+    def __init__(self, zero_mq_url: str):
+        self.zero_mq_url = zero_mq_url
+        self.semaphore = asyncio.Semaphore(3)  # Don't exceed 3 at a time
+
+    async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
+        async with self.semaphore:
+            context = zmq.asyncio.Context()
+            socket = context.socket(zmq.REQ)
+            socket.connect(self.zero_mq_url)
+
+            socket.send_json(dict(prompt=prompt, **kwargs))
+            response = await socket.recv_json()
+            socket.close()
+
+        image = Image.open(BytesIO(base64.b64decode(response['image'])))
+
+        return dict(image=image, revised_prompt=prompt)
+
+
 class GoogleImagenImageGenerator(ImageGenerator):
     def __init__(self, project_id: str):
         # TODO(developer): Update and un-comment below lines
         vertexai.init(project=project_id, location='us-central1')
         self.model = ImageGenerationModel.from_pretrained('imagegeneration@006')
+        self.sem = asyncio.Semaphore(5)
 
     @property
     def num_multiple(self) -> int:
         return 4
 
     async def generate_image(self, prompt: str, **kwargs) -> List[Dict[str, Any]] | Dict[str, Any]:
-        try:
-            images = self.model.generate_images(
-                prompt=prompt,
-                number_of_images=self.num_multiple,
-                language='en',
-                add_watermark=False,
-                seed=kwargs.get('seed', 0),
-                aspect_ratio='1:1',
-                safety_filter_level='block_some',
-                person_generation='allow_adult',
-            ).images
+        async with self.sem:
+            try:
+                images = self.model.generate_images(
+                    prompt=prompt,
+                    number_of_images=self.num_multiple,
+                    language='en',
+                    add_watermark=False,
+                    seed=kwargs.get('seed', 0),
+                    aspect_ratio='1:1',
+                    safety_filter_level='block_some',
+                    person_generation='allow_adult',
+                ).images
 
-            if not images:
+                if not images:
+                    return None
+
+                return [dict(image=image._pil_image, revised_prompt=prompt) for image in images]
+            except:
                 return None
-
-            return [dict(image=image._pil_image, revised_prompt=prompt) for image in images]
-        except:
-            return None
 
 
 class AzureOpenAIImageGenerator(ImageGenerator):

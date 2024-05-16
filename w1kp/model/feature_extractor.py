@@ -1,14 +1,18 @@
-__all__ = ['RGBColorFeatureExtractor', 'LexicalFeatureExtractor']
+__all__ = ['RGBColorFeatureExtractor', 'LexicalFeatureExtractor', 'GPT4FeatureExtractor']
 
+import asyncio
 import re
 import subprocess
+from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Dict
 
 import numpy as np
 import pandas as pd
+from openai import AzureOpenAI
 import requests
+import stanza
 from PIL.Image import Image
 from nltk.corpus import wordnet
 from nltk.corpus.reader import Synset
@@ -22,13 +26,43 @@ def conceptnet_get_isa(word):
     ).json()['edges'])
 
 
+class GPT4FeatureExtractor:
+    def __init__(self, azure_client: AzureOpenAI):
+        self.azure_client = azure_client
+
+    def extract_thematic_roles(self, sentence: str) -> int:
+        content = self.generate_gpt4_response(f'Extract the number of semantic thematic roles from this sentence: "{sentence}" Do not explain; only reply with an integer.')
+
+        try:
+            return int(content)
+        except:
+            return 1
+
+    def generate_gpt4_response(self, prompt: str) -> str:
+        r = self.azure_client.chat.completions.create(
+            messages=[dict(role='user', content=prompt)],
+            timeout=60,
+            model='gpt-4-32k',
+            temperature=0,
+        )
+
+        return r.choices[0].message.content
+
+
 class LexicalFeatureExtractor:
-    def __init__(self, google_corpus_path: str, concreteness_corpus_path: str, wn_binary_path: str = None):
+    def __init__(
+            self,
+            google_corpus_path: str,
+            concreteness_corpus_path: str,
+            wn_binary_path: str = None
+    ):
         """
         Args:
             wn_binary_path: If specified, use this WordNet binary instead of the NLTK WordNet. Needed for custom senses.
         """
-        freq_words = Path(google_corpus_path).read_text().splitlines()
+        stanza.download('en')
+        self.nlp = stanza.Pipeline('en', processors='tokenize,pos,lemma,depparse')
+        freq_words = list(dict.fromkeys([x.lower().strip() for x in Path(google_corpus_path).read_text().splitlines()]))
         freqs = 1 / np.arange(2, len(freq_words) + 2)
         self.freq_df = pd.DataFrame({'word': freq_words, 'freq': freqs})
         self.freq_df.set_index('word', inplace=True)
@@ -36,6 +70,10 @@ class LexicalFeatureExtractor:
         self.concrete_df = pd.read_csv(concreteness_corpus_path, sep='\t')
         self.concrete_df.set_index('Word', inplace=True)
         self.wn_binary_path = wn_binary_path
+
+    @lru_cache(maxsize=100000)
+    def cached_nlp(self, text: str):
+        return self.nlp(text)
 
     def count_synsets(self, word: str) -> int:
         def parse_num_senses(output: str) -> int:
@@ -61,19 +99,42 @@ class LexicalFeatureExtractor:
         return self.concrete_df.loc[word, 'Conc.M']
 
     def frequency(self, word: str) -> float:
-        return self.freq_df.loc[word, 'freq']
+        return self.freq_df.loc[word.lower().strip(), 'freq']
 
     def count_hyponyms(self, word: str = None, synsets: List[Synset] = None, is_first_call: bool = True) -> int:
         # wordnet.synsets(word)[0].hyponyms() is not as precise or comprehensive
         return conceptnet_get_isa(word)
 
-    def extract(self, word: str) -> Dict[str, float]:
+    def extract_word(self, word: str) -> Dict[str, float]:
         return dict(
             num_synsets=self.count_synsets(word),
             concreteness=self.concreteness(word),
             frequency=self.frequency(word),
             num_hyponyms=self.count_hyponyms(word),
         )
+
+    def extract_sentence(self, sentence: str) -> Dict[str, float]:
+        doc = self.cached_nlp(sentence)
+        words = [word.text for sent in doc.sentences for word in sent.words]
+        data_dict = defaultdict(list)
+
+        for word in words:
+            try:
+                data_dict['concreteness'].append(self.concreteness(word))
+            except:
+                pass
+
+            try:
+                data_dict['frequency'].append(self.frequency(word))
+            except:
+                pass
+
+            try:
+                data_dict['num_synsets'].append(self.count_synsets(word))
+            except:
+                pass
+
+        return {k: np.mean(v) for k, v in data_dict.items()}
 
 
 class RGBColorFeatureExtractor:

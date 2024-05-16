@@ -35,7 +35,8 @@ class GenerationExperiment:
     def load_image(self) -> PIL.Image.Image:
         # Lazy loading
         if self.image is None:
-            self.image = PIL.Image.open(str(self.get_path('image.png')))
+            with PIL.Image.open(str(self.get_path('image.png'))) as image:
+                self.image = image.copy()
 
         return self.image
 
@@ -84,7 +85,11 @@ class GenerationExperiment:
             if not f_id.is_dir():
                 continue
 
-            yield list(cls.iter_by_seed(folder.parent, f_id.name, model_name=model_name))
+            ret = yield list(cls.iter_by_seed(folder.parent, f_id.name, model_name=model_name))
+
+            if ret:
+                yield  # close the generator
+                return
 
     @classmethod
     def iter_all(cls, folder: Path | str) -> List['GenerationExperiment']:
