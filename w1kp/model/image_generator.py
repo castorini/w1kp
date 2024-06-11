@@ -143,8 +143,10 @@ class AsyncSDXLServer:
             message = await socket.recv_json()
             prompt = message['prompt']
             seed = message.get('seed', 0)
+            guidance_scale = message.get('guidance_scale')
+            kwargs = dict(guidance_scale=guidance_scale) if guidance_scale is not None else {}
 
-            image = (await self.generator.generate_image(prompt, seed=seed))['image']
+            image = (await self.generator.generate_image(prompt, seed=seed, **kwargs))['image']
             buffer = BytesIO()
             image.save(buffer, format='PNG')
             image_str = base64.b64encode(buffer.getvalue()).decode('utf-8')

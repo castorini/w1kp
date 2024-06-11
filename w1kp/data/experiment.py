@@ -1,5 +1,6 @@
 __all__ = ['GenerationExperiment', 'Comparison2AFCExperiment', 'synthesize_2afc_experiments']
 
+import json
 from contextlib import closing
 from dataclasses import dataclass
 import itertools
@@ -24,6 +25,7 @@ class GenerationExperiment:
     seed: str = None
     root_folder: Path = None
     image: None | Image = None
+    metadata: dict = None
 
     def __post_init__(self):
         if self.seed is None:
@@ -52,9 +54,14 @@ class GenerationExperiment:
             except:
                 raise
 
+        try:
+            metadata = json.loads((folder / 'metadata.json').read_text())
+        except FileNotFoundError:
+            metadata = None
+
         seed = seed or folder.name
 
-        return cls(prompt, id=folder.parent.name, root_folder=folder.parent.parent.parent, model_name=model_name, seed=seed)
+        return cls(prompt, id=folder.parent.name, root_folder=folder.parent.parent.parent, model_name=model_name, seed=seed, metadata=metadata)
 
     @classmethod
     def get_ids(cls, folder: Path | str, model_name: str = 'UNSPECIFIED') -> List[str]:
@@ -114,6 +121,9 @@ class GenerationExperiment:
         root_folder = self.get_path()
         root_folder.mkdir(exist_ok=overwrite, parents=True)
         (root_folder / 'prompt.txt').write_text(self.prompt)
+
+        if self.metadata is not None:
+            (root_folder / 'metadata.json').write_text(json.dumps(self.metadata))
 
         if self.image is not None:
             self.image.save(root_folder / 'image.png')

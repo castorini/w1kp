@@ -30,6 +30,8 @@ async def amain():
     parser.add_argument('--skip-num', '-sn', type=int, default=0, help='The number of prompts to skip from the beginning')
     parser.add_argument('--start-id', '-sid', type=int, default=0)
     parser.add_argument('--async-sdxl-urls', '-asu', type=str, nargs='+')
+    parser.add_argument('--start-seed', '-ss', type=int, default=0)
+    parser.add_argument('--guidance-scale', '-gs', type=float, default=None)
     args = parser.parse_args()
 
     match args.type:
@@ -92,7 +94,7 @@ async def amain():
         skip = False
         exists = False
 
-        for seed in range(num_images_per_seed):
+        for seed in range(args.start_seed, args.start_seed + num_images_per_seed):
             seed = str(seed)
             exp = GenerationExperiment(
                 prompt,
@@ -115,13 +117,14 @@ async def amain():
 
         print(f'Generating prompt {ds_idx}: {prompt}')
         coroutines = []
+        gen_kwargs = dict(guidance_scale=args.guidance_scale) if args.guidance_scale is not None else {}
 
-        for seed in range(num_images_per_seed):
-            coroutines.append(image_gens[seed % len(image_gens)].generate_image(prompt, seed=seed))
+        for seed in range(args.start_seed, args.start_seed + num_images_per_seed):
+            coroutines.append(image_gens[seed % len(image_gens)].generate_image(prompt, seed=seed, **gen_kwargs))
 
         outputs = await tqdm_asyncio.gather(*coroutines, desc='Generating images', position=2)
 
-        for seed, ret in zip(range(num_images_per_seed), outputs):
+        for seed, ret in zip(range(args.start_seed, args.start_seed + num_images_per_seed), outputs):
             if ret is None:
                 continue
 
@@ -141,6 +144,9 @@ async def amain():
                     id=str(ds_idx + args.start_id),
                     root_folder=args.output_folder
                 )
+
+                if args.guidance_scale is not None:
+                    exp.metadata = dict(guidance_scale=args.guidance_scale)
 
                 exp.save(overwrite=True)
                 gen_image.close()

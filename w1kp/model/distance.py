@@ -21,6 +21,7 @@ from skimage.metrics import structural_similarity as ssim
 from stlpips_pytorch import stlpips
 from torch import nn
 from torch.nn.functional import binary_cross_entropy_with_logits as bce_loss
+from torcheval.metrics import FrechetInceptionDistance
 from torchvision import transforms
 from transformers import CLIPModel, CLIPProcessor, ViTImageProcessor, ViTModel, AutoImageProcessor, \
     Dinov2Model, AutoTokenizer, CLIPTokenizer, GroupViTModel, AutoProcessor
@@ -52,7 +53,12 @@ class ListwiseDistanceMeasureServer:
                 with PIL.Image.open(BytesIO(base64.b64decode(image_string))) as image:
                     images.append(image.copy())
 
-            result = self.measure.measure(prompt, images, reduce=reduce)
+            result = self.measure.measure(
+                prompt,
+                images,
+                reduce=reduce,
+                extract_pairwise_distances=message.get('extract_pairwise_distances', False)
+            )
             response = dict(result=result)
             socket.send_json(response)
 
@@ -701,14 +707,19 @@ class ListwiseDreamSimDistanceMeasure(ListwiseDistanceMeasure):
 
             ret = {}
 
+            if kwargs.get('extract_pairwise_distances'):
+                ret['pairwise_l2'] = pairwise_l2.cpu().numpy().tolist()
+
             if reduce == 'mean' or reduce == 'all':
                 ret['mean'] = pairwise_l2_nonzero.mean().item()
 
             if reduce == 'min' or reduce == 'all':
                 ret['min'] = pairwise_l2_nonzero.min().item()
 
+            pairwise_l2.fill_diagonal_(1e7)  # set diagonal to a large value to avoid self-distances
+
             if reduce == 'u5' or reduce == 'all' or reduce == 'reusability':
-                sizes = [5, 10, 25, 50, 100, 150, 200] if reduce == 'reusability' else [5]
+                sizes = [2, 3, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100, 125, 150, 200, 250, 300] if reduce == 'reusability' else [3, 5]
 
                 for size in sizes:
                     dists = []
@@ -721,7 +732,6 @@ class ListwiseDreamSimDistanceMeasure(ListwiseDistanceMeasure):
                         idx = perm[:perm_size]
 
                         pl2 = pairwise_l2[idx][:, idx]
-                        pl2.fill_diagonal_(1e7)
                         dists.append(pl2.min().item())
                         avg_min_idx = pl2.argmin().item()
                         min_indices.append((pl2.min().item(), (perm_map[avg_min_idx // perm_size], perm_map[avg_min_idx % perm_size])))
