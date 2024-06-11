@@ -10,7 +10,7 @@ As proposed in [our paper](), W1KP is a toolkit for analyzing perceptual variabi
 
 2. Install W1KP: `pip install w1kp`
 
-3. Download the [calibration data file]().
+3. Download the [calibration data file](cdf-xy.pt).
 
 4. You're done!
 
