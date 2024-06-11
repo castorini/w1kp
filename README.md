@@ -20,7 +20,7 @@ As proposed in [our paper](), W1KP is a framework for analyzing perceptual varia
 
 ### Sample Library Usage
 
-We recommend $\text{DreamSim}_{\ell_2}$, the best performing perceptual distance backbone found in our paper.
+We recommend $\text{DreamSim}_{\ell_2}$, the best-performing perceptual distance backbone found in our paper.
 ```python
 import asyncio
 
