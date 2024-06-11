@@ -41,7 +41,7 @@ async def amain():
   # Compute and normalize the W1KP score
   dreamsim_l2 = DreamSimDistanceMeasure().to_listwise()
   w1kp_score = dreamsim_l2.measure(images)
-  cdf_x, cdf_y = torch.load('cdf-xy.pt')  # download this data file form repo main
+  cdf_x, cdf_y = torch.load('cdf-xy.pt')  # download this data file from the repo
 
   dist = dreamsim_l2.measure(prompt, images)
   dist = query_inverted_cdf(cdf_x, cdf_y, dist)  # normalize to U[0, 1]
