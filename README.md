@@ -10,7 +10,7 @@ As proposed in [our paper](), W1KP is a framework for analyzing perceptual varia
 ## Getting Started
 
 ### Installation
-1. Install [PyTorch](https://pytorch.org) for your platform with Python 3.10+.
+1. Install [PyTorch](https://pytorch.org) for your Python 3.10+ environment.
 
 2. Install W1KP: `pip install w1kp`
 
