@@ -1,7 +1,7 @@
 # <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: The Words of a Thousand Pictures Image Variability Metric
 [![Website](https://img.shields.io/badge/Website-online-green.svg)](http://w1kp.com) [![Citation](https://img.shields.io/badge/Citation-arXiv-orange.svg)](https://gist.github.com/daemon/639de6fea584d7df1a62f04a2ea0cdad) [![PyPi version](https://badgen.net/pypi/v/w1kp?color=blue)](https://pypi.org/project/w1kp) [![Downloads](https://static.pepy.tech/badge/w1kp)](https://pepy.tech/project/w1kp)
 
-As proposed in [our paper](), W1KP is a toolkit for analyzing perceptual variability for sets of images in text-to-image generation.
+As proposed in [our paper](), W1KP is a framework for analyzing perceptual variability for sets of images in text-to-image generation, bootstrapped from existing perceptual distances such as DreamSim.
 
 ## Getting Started
 
@@ -15,6 +15,43 @@ As proposed in [our paper](), W1KP is a toolkit for analyzing perceptual variabi
 4. You're done!
 
 ### Sample Library Usage
+
+We recommend $\text{DreamSim}_{\ell_2}$, the best performing perceptual distance backbone found in our paper.
+```python
+import asyncio
+
+import torch
+from w1kp import StableDiffusionXLImageGenerator, DreamSimDistanceMeasure, query_inverted_cdf
+
+
+async def amain():
+  # Generate 10 SDXL images for a prompt
+  prompt = 'cat'
+  images = []
+  image_gen = StableDiffusionXLImageGenerator()
+
+  for seed in range(10):
+    ret = await image_gen.generate_image(prompt, seed=seed)
+    images.append(ret['image'])
+
+  # Compute and normalize the W1KP score
+  dreamsim_l2 = DreamSimDistanceMeasure().to_listwise()
+  w1kp_score = dreamsim_l2.measure(images)
+  cdf_x, cdf_y = torch.load('cdf-xy.pt')  # download this data file form repo main
+
+  dist = dreamsim_l2.measure(prompt, images)
+  dist = query_inverted_cdf(cdf_x, cdf_y, dist)  # normalize to U[0, 1]
+  w1kp_score = 1 - dist  # invert for the W1KP score
+
+  for im in images:
+    im.show()
+
+  print(f'The W1KP score for the images are {w1kp_score}')
+  
+
+if __name__ == '__main__':
+  asyncio.run(amain())
+```
 
 ## Citation
 ```
