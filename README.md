@@ -1,11 +1,11 @@
-# <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: The "Words of 1K Pictures" Image Variability Metric
+# <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: An Image Variability Metric
 [![Website](https://img.shields.io/badge/Website-online-green.svg)](http://w1kp.com) [![Citation](https://img.shields.io/badge/Citation-arXiv-orange.svg)](https://gist.github.com/daemon/639de6fea584d7df1a62f04a2ea0cdad) [![PyPi version](https://badgen.net/pypi/v/w1kp?color=blue)](https://pypi.org/project/w1kp) [![Downloads](https://static.pepy.tech/badge/w1kp)](https://pepy.tech/project/w1kp)
 
 <p align="center">
   <img src="https://github.com/castorini/w1kp/assets/6188572/4f4c2ad2-2716-43aa-9119-41b4c7d85465"/>
 </p>
 
-As proposed in [our paper](), W1KP is a framework for analyzing perceptual variability for sets of images in text-to-image generation, bootstrapped from existing perceptual distances such as DreamSim.
+As proposed in [our paper](), the "Words of a Thousand Pictures" metric (W1KP) measures perceptual variability for sets of images in text-to-image generation, bootstrapped from existing perceptual distances such as DreamSim.
 
 ## Getting Started
 
