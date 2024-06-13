@@ -1,4 +1,4 @@
-# <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: Words of 1K Pictures Image Variability Metric
+# <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: The "Words of 1K Pictures" Image Variability Metric
 [![Website](https://img.shields.io/badge/Website-online-green.svg)](http://w1kp.com) [![Citation](https://img.shields.io/badge/Citation-arXiv-orange.svg)](https://gist.github.com/daemon/639de6fea584d7df1a62f04a2ea0cdad) [![PyPi version](https://badgen.net/pypi/v/w1kp?color=blue)](https://pypi.org/project/w1kp) [![Downloads](https://static.pepy.tech/badge/w1kp)](https://pepy.tech/project/w1kp)
 
 <p align="center">
@@ -20,7 +20,7 @@ As proposed in [our paper](), W1KP is a framework for analyzing perceptual varia
 
 ### Sample Library Usage
 
-We recommend $\text{DreamSim}_{\ell_2}$, the best-performing perceptual distance backbone found in our paper.
+We recommend $\text{DreamSim}_{\ell_2}$, the best-performing perceptual distance backbone in our paper.
 ```python
 import asyncio
 
