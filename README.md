@@ -1,4 +1,4 @@
-# <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: An Image Variability Metric
+# <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: An Image Set Variability Metric
 [![Website](https://img.shields.io/badge/Website-online-green.svg)](http://w1kp.com) [![Citation](https://img.shields.io/badge/Citation-arXiv-orange.svg)](https://gist.github.com/daemon/1d1351f23aacef1ef6edef1a4afd9784) [![PyPi version](https://badgen.net/pypi/v/w1kp?color=blue)](https://pypi.org/project/w1kp) [![Downloads](https://static.pepy.tech/badge/w1kp)](https://pepy.tech/project/w1kp)
 
 <p align="center">
