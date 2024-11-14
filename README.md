@@ -59,10 +59,19 @@ if __name__ == '__main__':
 
 ## Citation
 ```
-@article{tang2024w1kp,
-  title={Words Worth a Thousand Pictures: Measuring and Understanding Perceptual Variability in Text-to-Image Generation},
-  author={Tang, Raphael and Zhang, Xinyu and Xu, Lixinyu and Lu, Yao and Li, Wenyan and Stenetorp, Pontus and Lin, Jimmy and Ture, Ferhan},
-  journal={arXiv:2210.04885},
-  year={2024}
+@inproceedings{tang2024words,
+    title = "Words Worth a Thousand Pictures: Measuring and Understanding Perceptual Variability in Text-to-Image Generation",
+    author = "Tang, Raphael  and
+      Zhang, Crystina  and
+      Xu, Lixinyu  and
+      Lu, Yao  and
+      Li, Wenyan  and
+      Stenetorp, Pontus  and
+      Lin, Jimmy  and
+      Ture, Ferhan",
+    booktitle = "Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing",
+    year = "2024",
+    url = "https://aclanthology.org/2024.emnlp-main.311",
+    pages = "5441--5454",
 }
 ```
