@@ -1,5 +1,5 @@
 # <img src="icon-banner.svg" height="32" style="position: relative; margin-top: 15px;"/>: An Image Set Variability Metric
-[![Website](https://img.shields.io/badge/Website-online-green.svg)](http://w1kp.com) [![Citation](https://img.shields.io/badge/Citation-EMNLP2024-orange.svg)](https://gist.github.com/daemon/1d1351f23aacef1ef6edef1a4afd9784) [![PyPi version](https://badgen.net/pypi/v/w1kp?color=blue)](https://pypi.org/project/w1kp) [![Downloads](https://static.pepy.tech/badge/w1kp)](https://pepy.tech/project/w1kp)
+[![Website](https://img.shields.io/badge/Website-online-green.svg)](http://w1kp.com) [![Citation](https://img.shields.io/badge/Citation-EMNLP_2024-orange.svg)](https://gist.github.com/daemon/1d1351f23aacef1ef6edef1a4afd9784) [![PyPi version](https://badgen.net/pypi/v/w1kp?color=blue)](https://pypi.org/project/w1kp) [![Downloads](https://static.pepy.tech/badge/w1kp)](https://pepy.tech/project/w1kp)
 
 <p align="center">
   <img src="https://github.com/castorini/w1kp/assets/6188572/4f4c2ad2-2716-43aa-9119-41b4c7d85465"/>
